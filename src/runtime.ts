@@ -19,6 +19,13 @@ export interface LaunchCtx {
 	ui?: { notify: Notify };
 }
 
+export interface PreparedCompactionSnapshot {
+	firstKeptEntryId: string;
+	tokensBefore: number;
+	summary: string;
+	details: unknown;
+}
+
 export class Runtime {
 	config: Config = { ...DEFAULTS };
 	configLoaded = false;
@@ -26,6 +33,8 @@ export class Runtime {
 	observerPromise: Promise<void> | null = null;
 	compactInFlight = false;
 	compactHookInFlight = false;
+	preparedCompaction: PreparedCompactionSnapshot | null = null;
+	prepareCompactionPromise: Promise<void> | null = null;
 	resolveFailureNotified = false;
 
 	ensureConfig(cwd: string): void {

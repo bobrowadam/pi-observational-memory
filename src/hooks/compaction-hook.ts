@@ -97,6 +97,21 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			}
 			runtime.resolveFailureNotified = false;
 
+			const prepared = runtime.preparedCompaction;
+			if (prepared?.firstKeptEntryId === firstKeptEntryId) {
+				runtime.preparedCompaction = null;
+				debugLog("compaction.prepared.return", { firstKeptEntryId, tokensBefore });
+				if (hasUI) ui?.notify("Observational memory: using prepared compaction snapshot", "info");
+				return {
+					compaction: {
+						summary: prepared.summary,
+						firstKeptEntryId,
+						tokensBefore,
+						details: prepared.details,
+					},
+				};
+			}
+
 			const updateWidget = () => {
 				if (!hasUI || !ui) return;
 				if (!progress.getPhase()) {
@@ -116,11 +131,21 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 
 			let entries = branchEntries as Parameters<typeof getMemoryState>[0];
 
-			if (runtime.observerPromise) {
-				try { await runtime.observerPromise; } catch { /* already notified via launchObserverTask */ }
-				// In-flight observer may have appended a new observation entry during the await;
-				// refresh from sessionManager so gap computation and coverage collection see it
-				entries = ctx.sessionManager.getBranch() as typeof entries;
+			if (runtime.config.nonBlockingCompaction && runtime.observerPromise) {
+				if (!runtime.prepareCompactionPromise) {
+					const compactAgain = () => {
+						try {
+							if (ctx.isIdle()) ctx.compact();
+						} catch {
+							// stale ctx after session replacement/reload; next agent_end can retry
+						}
+					};
+					runtime.prepareCompactionPromise = runtime.observerPromise.then(compactAgain, compactAgain).finally(() => {
+						runtime.prepareCompactionPromise = null;
+					});
+				}
+				if (hasUI) ui?.notify("Observational memory: compaction deferred — observer catch-up is still running", "info");
+				return { cancel: true };
 			}
 
 			const memoryState = getMemoryState(entries);
@@ -290,13 +315,62 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			let finalReflections = workingReflections;
 			let finalObservations = workingObservations;
 
+			if (runtime.config.nonBlockingCompaction && observationTokens >= runtime.config.reflectionThresholdTokens && !runtime.prepareCompactionPromise) {
+				const compactAgain = () => {
+					try {
+						if (ctx.isIdle()) ctx.compact();
+					} catch {
+						// stale ctx after session replacement/reload; next agent_end can retry
+					}
+				};
+				runtime.prepareCompactionPromise = (async () => {
+					const bgProgress = new CompactionProgressTracker();
+					const bgController = new AbortController();
+					let bgReflections = workingReflections;
+					let bgObservations = workingObservations;
+					try {
+						debugLog("compaction.background_reflect_prune.start", { workingObservations: workingObservations.length, workingReflections: workingReflections.length, observationTokens });
+						const coverageBefore = coverageTagCounts(workingReflections, workingObservations);
+						const reflectorResult = await runReflector(
+							{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal: bgController.signal, onEvent: (event) => { bgProgress.onEvent(event); }, maxTurns: turnLimits.reflectorMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+							workingReflections,
+							workingObservations,
+							(pass, max) => { bgProgress.setPhase("reflector", pass, max); },
+						);
+						bgReflections = reflectorResult.reflections;
+						const prunerResult = await runPruner(
+							{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal: bgController.signal, onEvent: (event) => { bgProgress.onEvent(event); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+							bgReflections,
+							workingObservations,
+							runtime.config.reflectionThresholdTokens,
+							(pass, max) => { bgProgress.setPhase("pruner", pass, max); },
+						);
+						bgObservations = prunerResult.observations;
+						const coverageAfter = coverageTagCounts(bgReflections, workingObservations);
+						debugLog("compaction.background_reflect_prune.result", { reflectorStats: reflectorResult.stats, coverageBefore, coverageAfter, prunerResult });
+					} catch (error) {
+						const msg = error instanceof Error ? error.message : String(error);
+						debugLog("compaction.background_reflect_prune.error", { errorMessage: msg });
+						if (hasUI) ui?.notify(`Observational memory: background reflect/prune failed: ${msg}; compacting with unpruned observations`, "warning");
+					}
+					const summary = renderSummary(bgReflections, bgObservations);
+					const details: MemoryDetailsV4 = { type: "observational-memory", version: 4, observations: bgObservations, reflections: bgReflections };
+					runtime.preparedCompaction = { firstKeptEntryId, tokensBefore, summary, details };
+					if (hasUI) ui?.notify("Observational memory: prepared compaction snapshot; compacting now", "info");
+					compactAgain();
+				})().finally(() => {
+					runtime.prepareCompactionPromise = null;
+				});
+			}
+
+			if (runtime.config.nonBlockingCompaction && observationTokens >= runtime.config.reflectionThresholdTokens) {
+				if (hasUI) ui?.notify("Observational memory: compaction deferred — background reflector/pruner is running", "info");
+				return { cancel: true };
+			}
+
 			if (observationTokens >= runtime.config.reflectionThresholdTokens) {
 				try {
-					debugLog("compaction.reflect_prune.start", {
-						workingObservations: workingObservations.length,
-						workingReflections: workingReflections.length,
-						observationTokens,
-					});
+					debugLog("compaction.reflect_prune.start", { workingObservations: workingObservations.length, workingReflections: workingReflections.length, observationTokens });
 					if (hasUI) ui?.notify("Observational memory: running reflector + pruner...", "info");
 					progress.setPhase("reflector", 1, REFLECTOR_MAX_PASSES);
 					progress.setStartingCounts(workingReflections.length, workingObservations.length);
@@ -310,13 +384,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					);
 					finalReflections = reflectorResult.reflections;
 					const coverageAfter = coverageTagCounts(finalReflections, workingObservations);
-					debugLog("compaction.reflector.result", {
-						stats: reflectorResult.stats,
-						coverageBefore,
-						coverageAfter,
-						beforeReflections: workingReflections.length,
-						afterReflections: finalReflections.length,
-					});
+					debugLog("compaction.reflector.result", { stats: reflectorResult.stats, coverageBefore, coverageAfter, beforeReflections: workingReflections.length, afterReflections: finalReflections.length });
 
 					const prunerResult = await runPruner(
 						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
@@ -326,27 +394,10 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 						(pass, max) => { progress.setPhase("pruner", pass, max); updateWidget(); },
 					);
 					finalObservations = prunerResult.observations;
-					debugLog("compaction.pruner.result", {
-						stopReason: prunerResult.stopReason,
-						fellBack: prunerResult.fellBack,
-						droppedIds: prunerResult.droppedIds,
-						passes: prunerResult.passes,
-						beforeObservations: workingObservations.length,
-						afterObservations: finalObservations.length,
-					});
+					debugLog("compaction.pruner.result", { stopReason: prunerResult.stopReason, fellBack: prunerResult.fellBack, droppedIds: prunerResult.droppedIds, passes: prunerResult.passes, beforeObservations: workingObservations.length, afterObservations: finalObservations.length });
 					updateWidget();
-					if (hasUI) {
-						ui?.notify(
-							`Observational memory: diagnostics — ${formatReflectorStats(reflectorResult.stats)}; coverage ${formatCoverageCounts(coverageBefore)} → ${formatCoverageCounts(coverageAfter)}; ${formatPrunerStats(prunerResult)}`,
-							"info",
-						);
-					}
-					if (prunerResult.fellBack && hasUI) {
-						ui?.notify(
-							"Observational memory: pruner run failed; kept observation set unchanged",
-							"warning",
-						);
-					}
+					if (hasUI) ui?.notify(`Observational memory: diagnostics — ${formatReflectorStats(reflectorResult.stats)}; coverage ${formatCoverageCounts(coverageBefore)} → ${formatCoverageCounts(coverageAfter)}; ${formatPrunerStats(prunerResult)}`, "info");
+					if (prunerResult.fellBack && hasUI) ui?.notify("Observational memory: pruner run failed; kept observation set unchanged", "warning");
 				} catch (error) {
 					const msg = error instanceof Error ? error.message : String(error);
 					debugLog("compaction.reflect_prune.error", { errorMessage: msg });

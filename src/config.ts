@@ -9,6 +9,7 @@ export interface Config {
 	reflectionThresholdTokens: number;
 	passive: boolean;
 	debugLog: boolean;
+	nonBlockingCompaction: boolean;
 	compactionModel?: { provider: string; id: string };
 	observerMaxTurnsPerRun?: number;
 	reflectorMaxTurnsPerPass?: number;
@@ -30,6 +31,7 @@ export const DEFAULTS: Config = {
 	reflectionThresholdTokens: 30_000,
 	passive: false,
 	debugLog: false,
+	nonBlockingCompaction: false,
 	thinkingLevel: "low",
 };
 
@@ -66,6 +68,7 @@ function normalizeSettingsConfig(value: Partial<Config>): Partial<Config> {
 	const normalized = { ...value };
 	if ("passive" in normalized && typeof normalized.passive !== "boolean") delete normalized.passive;
 	if ("debugLog" in normalized && typeof normalized.debugLog !== "boolean") delete normalized.debugLog;
+	if ("nonBlockingCompaction" in normalized && typeof normalized.nonBlockingCompaction !== "boolean") delete normalized.nonBlockingCompaction;
 	normalizeTurnLimit(normalized, "observerMaxTurnsPerRun");
 	normalizeTurnLimit(normalized, "reflectorMaxTurnsPerPass");
 	normalizeTurnLimit(normalized, "prunerMaxTurnsPerPass");
