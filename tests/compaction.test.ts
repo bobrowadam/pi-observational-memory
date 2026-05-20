@@ -20,6 +20,7 @@ import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
 import { hashId } from "../src/ids.js";
 import { observationsToPromptLines } from "../src/observer.js";
 import { CONTEXT_USAGE_INSTRUCTIONS, REFLECTOR_SYSTEM } from "../src/prompts.js";
+import { Runtime } from "../src/runtime.js";
 import { estimateStringTokens } from "../src/tokens.js";
 import type { MemoryReflection, ObservationRecord, ReflectionRecord } from "../src/types.js";
 import { compactionEntry, messageEntry, observationEntry } from "./fixtures/session.js";
@@ -137,6 +138,32 @@ describe("reflection supporting observation normalization", () => {
 	});
 });
 
+describe("runtime cleanup", () => {
+	it("aborts background compaction state and clears the widget cleanup", () => {
+		const runtime = new Runtime();
+		const controller = new AbortController();
+		const cleanup = vi.fn();
+		runtime.backgroundCompactionAbortController = controller;
+		runtime.backgroundCompactionCleanup = cleanup;
+		runtime.prepareCompactionPromise = Promise.resolve();
+		runtime.preparedCompaction = {
+			firstKeptEntryId: "boundary",
+			tokensBefore: 1,
+			summary: "summary",
+			details: { type: "observational-memory", version: 4, observations: [observation], reflections: [] },
+		};
+
+		runtime.abortBackgroundCompaction();
+
+		expect(controller.signal.aborted).toBe(true);
+		expect(cleanup).toHaveBeenCalledTimes(1);
+		expect(runtime.backgroundCompactionAbortController).toBeNull();
+		expect(runtime.backgroundCompactionCleanup).toBeNull();
+		expect(runtime.prepareCompactionPromise).toBeNull();
+		expect(runtime.preparedCompaction).toBeNull();
+	});
+});
+
 describe("compaction hook", () => {
 	it("uses rendered observation tokens for the reflector/pruner gate", async () => {
 		agentLoopMock.mockReset();
@@ -245,6 +272,74 @@ describe("compaction hook", () => {
 		rmSync(debugRoot, { recursive: true, force: true });
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(observationsToPromptLines([shortObservation]).join("\n")).toContain("[111111111111]");
+	});
+
+	it("falls back to synchronous compaction for stale prepared snapshots", async () => {
+		agentLoopMock.mockReset();
+		agentLoopMock.mockImplementation(() => emptyAgentStream());
+
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const pi = {
+			on: vi.fn((eventName: string, cb: typeof handler) => {
+				expect(eventName).toBe("session_before_compact");
+				handler = cb;
+			}),
+			appendEntry: vi.fn(),
+		};
+		const runtime = {
+			compactHookInFlight: false,
+			observerPromise: null,
+			prepareCompactionPromise: null,
+			preparedCompaction: {
+				firstKeptEntryId: "old-boundary",
+				tokensBefore: 1,
+				summary: "stale summary",
+				details: { type: "observational-memory", version: 4, observations: [observation], reflections: [] },
+			},
+			resolveFailureNotified: false,
+			config: {
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 50_000,
+				reflectionThresholdTokens: 1,
+				nonBlockingCompaction: true,
+				passive: false,
+			},
+			ensureConfig: vi.fn(),
+			resolveModel: vi.fn(async () => ({ ok: true, model: {}, apiKey: "test-key" })),
+		};
+		registerCompactionHook(pi as never, runtime as never);
+		if (!handler) throw new Error("session_before_compact handler was not registered");
+
+		const entries = [
+			messageEntry({ id: "source-entry", message: { role: "user", content: "source" } }),
+			observationEntry({
+				id: "observation-entry",
+				data: {
+					records: [observation],
+					coversFromId: "source-entry",
+					coversUpToId: "source-entry",
+					tokenCount: estimateStringTokens(observation.content),
+				},
+			}),
+			messageEntry({ id: "new-boundary", message: { role: "user", content: "kept" } }),
+		];
+		const notify = vi.fn();
+		const result = await handler({
+			preparation: { firstKeptEntryId: "new-boundary", tokensBefore: 123 },
+			branchEntries: entries,
+			signal: undefined,
+		}, {
+			cwd: "/tmp/project",
+			hasUI: true,
+			ui: { notify, setWidget: vi.fn() },
+			sessionManager: { getBranch: vi.fn(() => entries) },
+		});
+
+		expect(result).toMatchObject({ compaction: { firstKeptEntryId: "new-boundary" } });
+		expect(runtime.preparedCompaction).toBeNull();
+		expect(runtime.prepareCompactionPromise).toBeNull();
+		expect(notify).toHaveBeenCalledWith("Observational memory: prepared snapshot is stale; compacting synchronously", "warning");
+		expect(agentLoopMock).toHaveBeenCalled();
 	});
 
 	it("explains zero-delta compaction cancellations with committed and pending counts", async () => {

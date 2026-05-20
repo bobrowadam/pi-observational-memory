@@ -10,6 +10,10 @@ import { registerRecallTool } from "./tools/recall-observation.js";
 export default function observationalMemory(pi: ExtensionAPI) {
 	const runtime = new Runtime();
 
+	pi.on("session_shutdown", () => {
+		runtime.abortBackgroundCompaction();
+	});
+
 	registerObserverTrigger(pi, runtime);
 	registerCompactionTrigger(pi, runtime);
 	registerCompactionHook(pi, runtime);

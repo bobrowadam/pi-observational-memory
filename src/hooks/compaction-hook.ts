@@ -97,6 +97,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			}
 			runtime.resolveFailureNotified = false;
 
+			let allowNonBlockingCompaction = runtime.config.nonBlockingCompaction;
 			const prepared = runtime.preparedCompaction;
 			if (prepared?.firstKeptEntryId === firstKeptEntryId) {
 				runtime.preparedCompaction = null;
@@ -110,6 +111,16 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 						details: prepared.details,
 					},
 				};
+			}
+			if (prepared) {
+				runtime.preparedCompaction = null;
+				allowNonBlockingCompaction = false;
+				debugLog("compaction.prepared.stale", {
+					preparedFirstKeptEntryId: prepared.firstKeptEntryId,
+					firstKeptEntryId,
+					tokensBefore,
+				});
+				if (hasUI) ui?.notify("Observational memory: prepared snapshot is stale; compacting synchronously", "warning");
 			}
 
 			const updateWidget = () => {
@@ -131,7 +142,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 
 			let entries = branchEntries as Parameters<typeof getMemoryState>[0];
 
-			if (runtime.config.nonBlockingCompaction && runtime.observerPromise) {
+			if (allowNonBlockingCompaction && runtime.observerPromise) {
 				if (!runtime.prepareCompactionPromise) {
 					const compactAgain = () => {
 						try {
@@ -315,7 +326,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			let finalReflections = workingReflections;
 			let finalObservations = workingObservations;
 
-			if (runtime.config.nonBlockingCompaction && observationTokens >= runtime.config.reflectionThresholdTokens && !runtime.prepareCompactionPromise) {
+			if (allowNonBlockingCompaction && observationTokens >= runtime.config.reflectionThresholdTokens && !runtime.prepareCompactionPromise) {
 				const compactAgain = () => {
 					try {
 						if (ctx.isIdle()) ctx.compact();
@@ -323,48 +334,81 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 						// stale ctx after session replacement/reload; next agent_end can retry
 					}
 				};
+				const bgProgress = new CompactionProgressTracker();
+				bgProgress.setStartingCounts(workingReflections.length, workingObservations.length);
+				const bgController = new AbortController();
+				let lastBackgroundWidgetUpdate = 0;
+				let backgroundWidgetCleared = false;
+				const clearBackgroundWidget = () => {
+					if (backgroundWidgetCleared) return;
+					backgroundWidgetCleared = true;
+					if (hasUI && ui) ui.setWidget(WIDGET_NAME, undefined);
+				};
+				const updateBackgroundWidget = (force = false) => {
+					if (!hasUI || !ui || bgController.signal.aborted) return;
+					const now = Date.now();
+					if (!force && now - lastBackgroundWidgetUpdate < 250) return;
+					lastBackgroundWidgetUpdate = now;
+					ui.setWidget(WIDGET_NAME, (_tui: any, theme: any) => {
+						return new Text(
+							bgProgress.formatWidget(theme),
+							0, 0,
+						);
+					});
+				};
+				runtime.backgroundCompactionAbortController = bgController;
+				runtime.backgroundCompactionCleanup = clearBackgroundWidget;
+				if (hasUI) ui?.notify("Observational memory: preparing compaction snapshot in background", "info");
 				runtime.prepareCompactionPromise = (async () => {
-					const bgProgress = new CompactionProgressTracker();
-					const bgController = new AbortController();
 					let bgReflections = workingReflections;
 					let bgObservations = workingObservations;
 					try {
 						debugLog("compaction.background_reflect_prune.start", { workingObservations: workingObservations.length, workingReflections: workingReflections.length, observationTokens });
 						const coverageBefore = coverageTagCounts(workingReflections, workingObservations);
 						const reflectorResult = await runReflector(
-							{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal: bgController.signal, onEvent: (event) => { bgProgress.onEvent(event); }, maxTurns: turnLimits.reflectorMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+							{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal: bgController.signal, onEvent: (event) => { bgProgress.onEvent(event); updateBackgroundWidget(); }, maxTurns: turnLimits.reflectorMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
 							workingReflections,
 							workingObservations,
-							(pass, max) => { bgProgress.setPhase("reflector", pass, max); },
+							(pass, max) => { bgProgress.setPhase("reflector", pass, max); updateBackgroundWidget(true); },
 						);
 						bgReflections = reflectorResult.reflections;
 						const prunerResult = await runPruner(
-							{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal: bgController.signal, onEvent: (event) => { bgProgress.onEvent(event); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+							{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal: bgController.signal, onEvent: (event) => { bgProgress.onEvent(event); updateBackgroundWidget(); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
 							bgReflections,
 							workingObservations,
 							runtime.config.reflectionThresholdTokens,
-							(pass, max) => { bgProgress.setPhase("pruner", pass, max); },
+							(pass, max) => { bgProgress.setPhase("pruner", pass, max); updateBackgroundWidget(true); },
 						);
 						bgObservations = prunerResult.observations;
 						const coverageAfter = coverageTagCounts(bgReflections, workingObservations);
 						debugLog("compaction.background_reflect_prune.result", { reflectorStats: reflectorResult.stats, coverageBefore, coverageAfter, prunerResult });
 					} catch (error) {
 						const msg = error instanceof Error ? error.message : String(error);
+						if (bgController.signal.aborted) {
+							debugLog("compaction.background_reflect_prune.aborted", { errorMessage: msg });
+							return;
+						}
 						debugLog("compaction.background_reflect_prune.error", { errorMessage: msg });
 						if (hasUI) ui?.notify(`Observational memory: background reflect/prune failed: ${msg}; compacting with unpruned observations`, "warning");
 					}
+					if (bgController.signal.aborted) return;
 					const summary = renderSummary(bgReflections, bgObservations);
 					const details: MemoryDetailsV4 = { type: "observational-memory", version: 4, observations: bgObservations, reflections: bgReflections };
 					runtime.preparedCompaction = { firstKeptEntryId, tokensBefore, summary, details };
 					if (hasUI) ui?.notify("Observational memory: prepared compaction snapshot; compacting now", "info");
+					clearBackgroundWidget();
 					compactAgain();
 				})().finally(() => {
+					if (runtime.backgroundCompactionAbortController === bgController) {
+						runtime.backgroundCompactionAbortController = null;
+						runtime.backgroundCompactionCleanup = null;
+					}
+					if (!bgController.signal.aborted) clearBackgroundWidget();
 					runtime.prepareCompactionPromise = null;
 				});
 			}
 
-			if (runtime.config.nonBlockingCompaction && observationTokens >= runtime.config.reflectionThresholdTokens) {
-				if (hasUI) ui?.notify("Observational memory: compaction deferred — background reflector/pruner is running", "info");
+			if (allowNonBlockingCompaction && observationTokens >= runtime.config.reflectionThresholdTokens) {
 				return { cancel: true };
 			}
 

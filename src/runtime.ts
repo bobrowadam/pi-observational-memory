@@ -35,7 +35,18 @@ export class Runtime {
 	compactHookInFlight = false;
 	preparedCompaction: PreparedCompactionSnapshot | null = null;
 	prepareCompactionPromise: Promise<void> | null = null;
+	backgroundCompactionAbortController: AbortController | null = null;
+	backgroundCompactionCleanup: (() => void) | null = null;
 	resolveFailureNotified = false;
+
+	abortBackgroundCompaction(): void {
+		this.backgroundCompactionAbortController?.abort();
+		this.backgroundCompactionAbortController = null;
+		this.prepareCompactionPromise = null;
+		this.preparedCompaction = null;
+		this.backgroundCompactionCleanup?.();
+		this.backgroundCompactionCleanup = null;
+	}
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;
