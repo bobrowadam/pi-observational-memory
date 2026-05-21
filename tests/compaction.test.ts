@@ -274,7 +274,54 @@ describe("compaction hook", () => {
 		expect(observationsToPromptLines([shortObservation]).join("\n")).toContain("[111111111111]");
 	});
 
-	it("falls back to synchronous compaction for stale prepared snapshots", async () => {
+	it("cancels compaction while a snapshot preparation is already running", async () => {
+		agentLoopMock.mockReset();
+
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const pi = {
+			on: vi.fn((eventName: string, cb: typeof handler) => {
+				expect(eventName).toBe("session_before_compact");
+				handler = cb;
+			}),
+			appendEntry: vi.fn(),
+		};
+		const runtime = {
+			compactHookInFlight: false,
+			observerPromise: null,
+			prepareCompactionPromise: Promise.resolve(),
+			preparedCompaction: null,
+			resolveFailureNotified: false,
+			config: {
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 50_000,
+				reflectionThresholdTokens: 1,
+				nonBlockingCompaction: true,
+				passive: false,
+			},
+			ensureConfig: vi.fn(),
+			resolveModel: vi.fn(async () => ({ ok: true, model: {}, apiKey: "test-key" })),
+		};
+		registerCompactionHook(pi as never, runtime as never);
+		if (!handler) throw new Error("session_before_compact handler was not registered");
+
+		const notify = vi.fn();
+		const result = await handler({
+			preparation: { firstKeptEntryId: "kept-entry", tokensBefore: 123 },
+			branchEntries: [messageEntry({ id: "kept-entry", message: { role: "user", content: "kept" } })],
+			signal: undefined,
+		}, {
+			cwd: "/tmp/project",
+			hasUI: true,
+			ui: { notify, setWidget: vi.fn() },
+			sessionManager: { getBranch: vi.fn(() => []) },
+		});
+
+		expect(result).toEqual({ cancel: true });
+		expect(notify).toHaveBeenCalledWith("Observational memory: compaction preparation still running", "info");
+		expect(agentLoopMock).not.toHaveBeenCalled();
+	});
+
+	it("uses a prepared snapshot when its kept boundary still exists", async () => {
 		agentLoopMock.mockReset();
 		agentLoopMock.mockImplementation(() => emptyAgentStream());
 
@@ -321,6 +368,7 @@ describe("compaction hook", () => {
 					tokenCount: estimateStringTokens(observation.content),
 				},
 			}),
+			messageEntry({ id: "old-boundary", message: { role: "user", content: "kept by prepared snapshot" } }),
 			messageEntry({ id: "new-boundary", message: { role: "user", content: "kept" } }),
 		];
 		const notify = vi.fn();
@@ -335,11 +383,11 @@ describe("compaction hook", () => {
 			sessionManager: { getBranch: vi.fn(() => entries) },
 		});
 
-		expect(result).toMatchObject({ compaction: { firstKeptEntryId: "new-boundary" } });
+		expect(result).toMatchObject({ compaction: { firstKeptEntryId: "old-boundary", summary: "stale summary" } });
 		expect(runtime.preparedCompaction).toBeNull();
 		expect(runtime.prepareCompactionPromise).toBeNull();
-		expect(notify).toHaveBeenCalledWith("Observational memory: prepared snapshot is stale; compacting synchronously", "warning");
-		expect(agentLoopMock).toHaveBeenCalled();
+		expect(notify).toHaveBeenCalledWith("Observational memory: using prepared compaction snapshot", "info");
+		expect(agentLoopMock).not.toHaveBeenCalled();
 	});
 
 	it("explains zero-delta compaction cancellations with committed and pending counts", async () => {

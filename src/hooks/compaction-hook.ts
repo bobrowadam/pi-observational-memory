@@ -98,15 +98,25 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			runtime.resolveFailureNotified = false;
 
 			let allowNonBlockingCompaction = runtime.config.nonBlockingCompaction;
+			if (allowNonBlockingCompaction && runtime.prepareCompactionPromise && !runtime.preparedCompaction) {
+				debugLog("compaction.prepared.in_progress", { firstKeptEntryId, tokensBefore });
+				if (hasUI) ui?.notify("Observational memory: compaction preparation still running", "info");
+				return { cancel: true };
+			}
 			const prepared = runtime.preparedCompaction;
-			if (prepared?.firstKeptEntryId === firstKeptEntryId) {
+			const preparedFirstKeptIndex = prepared ? branchEntries.findIndex((entry) => entry.id === prepared.firstKeptEntryId) : -1;
+			if (prepared && preparedFirstKeptIndex >= 0) {
 				runtime.preparedCompaction = null;
-				debugLog("compaction.prepared.return", { firstKeptEntryId, tokensBefore });
+				debugLog("compaction.prepared.return", {
+					preparedFirstKeptEntryId: prepared.firstKeptEntryId,
+					firstKeptEntryId,
+					tokensBefore,
+				});
 				if (hasUI) ui?.notify("Observational memory: using prepared compaction snapshot", "info");
 				return {
 					compaction: {
 						summary: prepared.summary,
-						firstKeptEntryId,
+						firstKeptEntryId: prepared.firstKeptEntryId,
 						tokensBefore,
 						details: prepared.details,
 					},
