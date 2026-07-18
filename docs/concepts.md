@@ -107,6 +107,8 @@ This is the main reason V3 compactions should feel instantaneous compared with V
 
 ## Ledger entries
 
+Each loaded session receives an append-only `om.implementation` custom entry for every distinct OM implementation it uses. Reopening a session with the same implementation does not duplicate the marker; upgrading the implementation appends a new marker at the upgrade boundary. It is session metadata rather than memory ledger state, so it never affects projections or progress. Its `data` records the package name/version, V3 ledger generation/schema version, and a full `gitCommit` only when the loaded package is a Git checkout whose commit can be resolved. Entries before the first marker predate this feature.
+
 V3 uses four custom memory ledger entry types:
 
 ```ts
