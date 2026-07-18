@@ -10,8 +10,7 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 
 | Surface | Purpose |
 |---|---|
-| `turn_end` observer trigger | Maybe run the observer in the background. |
-| `turn_end` reflect/drop trigger | Maybe run the due reflector, then run dropper maintenance only after same-run successful reflection. |
+| `agent_start` / `turn_end` consolidation trigger | Run the shared observer → reflector → consolidator → dropper pipeline when any stage is due. |
 | `agent_end` compaction trigger | Maybe call `ctx.compact()` when idle and over `compactAfterTokens`. |
 | `session_before_compact` hook | Build the V3 compaction payload deterministically. |
 | `/om:status` | Show ledger counts, drift, progress clocks, and worker state. |
@@ -22,42 +21,27 @@ V3 is ledger-centered: memory state is reconstructed by folding V3 ledger entrie
 
 ```mermaid
 flowchart TD
-    TE[turn_end]
+    Start[agent_start / turn_end]
+    Due{observer, reflector, reflection pool,<br/>or observation pool pressure due?}
+    Observer[Observer<br/>append observations if due]
+    Reflector[Reflector<br/>append reflections if due]
+    Consolidator[Consolidator<br/>append one atomic replacement event if over max]
+    Dropper[Dropper<br/>append only model-approved safe drops]
+
     AE[agent_end]
-    SBC[session_before_compact]
-
-    ObsDue{raw tokens since observation coverage<br/>≥ observeAfterTokens?}
-    Observer[Observer model call<br/>append om.observations.recorded]
-
-    ReflectDropDue{observer not due<br/>and reflection/drop clock due?}
-    BothDue{both due?}
-    ReflectorOnly{reflector due only?}
-    Reflector[Reflector model call<br/>append om.reflections.recorded]
-    Dropper[Dropper model call<br/>append om.observations.dropped]
-
-    CompactDue{raw tokens since compaction<br/>≥ compactAfterTokens<br/>and idle?}
+    CompactDue{raw tokens since compaction<br/>≥ compactAfterTokens and idle?}
     CompactCall[ctx.compact]
-
-    Fold[fold/project V3 ledger]
+    SBC[session_before_compact]
+    Fold[fold/project active V3 memory]
     Render[render deterministic summary]
-    Details[return om.folded details]
 
-    TE --> ObsDue
-    ObsDue -- yes --> Observer
-    ObsDue -- no --> ReflectDropDue
-    ReflectDropDue --> BothDue
-    BothDue -- yes --> Reflector --> Dropper
-    BothDue -- no --> ReflectorOnly
-    ReflectorOnly -- yes --> Reflector
-    ReflectorOnly -- no --> Dropper
-
+    Start --> Due
+    Due -- yes --> Observer --> Reflector --> Consolidator --> Dropper
     AE --> CompactDue
-    CompactDue -- yes --> CompactCall
-    CompactCall --> SBC
-    SBC --> Fold --> Render --> Details
+    CompactDue -- yes --> CompactCall --> SBC --> Fold --> Render
 ```
 
-The observer has priority. Reflect/drop does not run on a turn where observer work is due.
+The stages share one in-flight lock and one cached model resolver. Each stage re-reads the branch, so observer output can unblock reflection and reflector output is folded before consolidation. Dropper normally requires non-empty same-run reflector output, but active observation pressure strictly above max can run it independently.
 
 ## Source entries and progress
 
@@ -75,7 +59,8 @@ Every V3 ledger entry has `data.coversUpToId`. That field is a progress and proj
 |---|---|
 | Observer | latest `om.observations.recorded.data.coversUpToId` |
 | Reflector | latest `om.reflections.recorded.data.coversUpToId` |
-| Dropper | latest `om.observations.dropped.data.coversUpToId` |
+| Consolidator | active reflection token total (strictly above max); appended event inherits latest reflection coverage |
+| Dropper | same-run non-empty reflection plus pool above target, or active observation pool strictly above max; latest drop watermark records completed maintenance |
 | Auto-compaction | latest compaction boundary |
 
 The watermark is also used to decide whether a memory ledger entry belongs to a bounded projection. It is not provenance. Provenance lives in `sourceEntryIds` and `supportingObservationIds`.
@@ -130,6 +115,21 @@ type Reflection = {
 
 The reflector must cite valid active observation ids.
 
+### Reflections consolidated
+
+```ts
+customType: "om.reflections.consolidated"
+data: {
+  entries: Array<{
+    replacement: Reflection;
+    supersededReflectionIds: string[];
+  }>;
+  coversUpToId: string;
+}
+```
+
+Each event is one atomic append. Replacement ids, token counts, and ordered supporting-observation unions are derived in code. Superseded originals remain historical; folds expose them through historical reflection collections but exclude them from active reflections and new compaction details.
+
 ### Observations dropped
 
 ```ts
@@ -175,24 +175,26 @@ The observer trigger runs on `turn_end`.
 
 If no observations are generated, the worker writes no entry and does not advance coverage. A later eligible observer run will see a larger range.
 
-## Reflect/drop flow
+## Shared consolidation flow
 
-Reflect/drop also runs on `turn_end`, but only when the observer is not due.
+The shared pipeline can launch from `agent_start` or `turn_end` when observer progress, reflector progress, active reflection-pool pressure, or active observation-pool pressure is due.
 
 1. Load config if needed.
 2. Skip if `passive` is true.
-3. Skip if observer or reflect/drop work is already in flight.
-4. Skip if observer progress has reached `observeAfterTokens`.
-5. Check the reflector raw-token clock against `reflectAfterTokens`.
+3. Skip if the shared consolidation pipeline is already in flight.
+4. Check observer and reflector raw-token clocks plus active reflection-pool and observation-pool pressure.
 6. Resolve the model only for stages that are ready to run.
 7. Fold current ledger state.
 8. If reflector is due and observation coverage exists, run the reflector. Each active observation line is annotated with current reflection coverage (`none`, `partial`, or `strong`) so the reflector can review uncovered durable facts without treating coverage as a quota.
 9. Append non-empty `om.reflections.recorded` with `coversUpToId` set to the latest observation coverage marker. Support ids are downstream dropper coverage evidence and should include all and only observations whose durable meaning is preserved with equivalent fidelity.
-10. Only after that same-run non-empty reflection append, check whether the folded active observation pool is over `observationsPoolTargetTokens`.
-11. If over target, run the dropper with same-turn reflections available. It computes a maximum drop count from tokens over target converted to an approximate observation count and annotates active observations with reflection coverage tiers (`none`, `partial`, `strong`) for model judgment.
-12. Append non-empty `om.observations.dropped` with `coversUpToId` set to the earlier branch position of latest observation coverage and same-run reflection coverage.
+10. Re-fold after reflector. If active reflection tokens are strictly above `reflectionsPoolMaxTokens`, run the consolidator with active reflections only, toward `reflectionsPoolTargetTokens`.
+11. Validate proposed replacement groups and append all accepted reductions in one `om.reflections.consolidated` event. Unknown/overlapping ids, collisions, multiline content, non-reductions, and light one-for-one rewrites are rejected.
+12. Check the folded active observation pool. Above target, same-run non-empty reflection output enables dropper maintenance; strictly above `observationsPoolMaxTokens`, pressure also enables it without same-run reflections.
+13. Run the dropper with folded active reflections and active observations; superseded reflections are never merged back into its input. The target sizes the maximum candidate count, but the safety prompt may keep every record.
+14. Append non-empty `om.observations.dropped`. Use the earlier latest observation/reflection coverage marker when reflection coverage exists, or the latest observation coverage marker when it does not.
+15. If a pressure-only pass makes no progress, cool down that active-observation fingerprint until the active pool changes or a same-run reflection creates a retry opportunity.
 
-Reflector no-output and reflector failure skip same-turn dropper. Dropper failure does not roll back already-appended reflections.
+Reflector no-output or failure still skips target-only dropper work, but does not block strictly-over-max pressure maintenance. Consolidator-only work can run from reflection-pool pressure without itself enabling target-only dropper work. Dropper failure does not roll back earlier reflection or consolidation events.
 
 ## Auto-compaction trigger
 
@@ -209,7 +211,7 @@ It skips when:
 
 When all checks pass, it calls `ctx.compact()`.
 
-This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
+This trigger does not wait for observer, reflector, consolidator, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
 
 ## Compaction hook
 
@@ -240,7 +242,7 @@ V3 uses projection helpers so commands, compaction, and recall do not each inven
 
 ### Full projection
 
-Full projection folds valid V3 observations, reflections, and drops from branch root through the requested boundary. Memory entries are included by resolving their `data.coversUpToId` marker against the boundary, not by the physical position of the `om.*` custom entry. Old V2 entries/details, invalid V3-shaped entries, and dangling coverage markers are ignored.
+Full projection folds valid V3 observations, reflections, reflection consolidations, and drops from branch root through the requested boundary. Memory entries are included by resolving their `data.coversUpToId` marker against the boundary, not by the physical position of the `om.*` custom entry. Old V2 entries/details, invalid V3-shaped entries, and dangling coverage markers are ignored.
 
 ### Visible projection
 
@@ -284,15 +286,14 @@ The renderer is deterministic. It does not call a model and does not rewrite mem
 Shows:
 
 - recorded/dropped/visible observation counts, with plain `+N` / `-N` visible-vs-full drift suffixes when drift exists;
-- recorded/visible reflection counts, with a plain `+N` drift suffix when full memory has extra reflections;
+- recorded/superseded/active/visible reflection counts, with a plain `+N` drift suffix when full memory has extra active reflections;
 - next observation/reflection/compaction token progress and drop coverage since the last successful drop;
 - visible observation pool pressure against `observationsPoolMaxTokens` from the current compaction projection;
-- active observation pool pressure against `observationsPoolTargetTokens` from folded active observations;
-- dropper state explaining whether the active pool is under target or waiting for the next successful reflection;
-- reflection pool token total;
+- active observation pool pressure against the desired `observationsPoolTargetTokens` and maintenance-trigger `observationsPoolMaxTokens` from folded active observations;
+- visible reflection tokens and active reflection pool pressure against its target and max;
 - passive mode;
 - worker in-flight flags;
-- last observer and reflect/drop errors.
+- last observer, reflector, consolidator, and dropper errors.
 
 ### `/om:view`
 
@@ -310,21 +311,21 @@ The agent-facing `recall` tool accepts a 12-character lowercase hex id.
 
 1. Validate id shape.
 2. Read the current branch.
-3. Index V3 observations, reflections, and drops from ledger history.
+3. Index V3 observations, recorded reflections, consolidation replacements/lineage, and drops from ledger history.
 4. Match the id against observations and reflections.
 5. For observations, mark status as `active` or `dropped`.
 6. Resolve observation source entries from `sourceEntryIds`.
-7. For reflections, resolve supporting observations and their sources.
+7. For reflections, resolve supporting observations, sources, active/superseded status, and consolidation lineage.
 8. Return exact evidence plus diagnostics for missing/non-source entries.
 
 Recall ignores old V2 memory by construction because it indexes only V3 ledger entry types.
 
 ## Error and race handling
 
-- Worker in-flight flags prevent duplicate observer or reflect/drop runs.
-- Observer priority prevents reflect/drop from advancing while source text is due for observation.
+- One shared in-flight flag prevents duplicate consolidation pipelines.
+- Stages re-read appended branch state before deciding whether their own work is due.
 - No-output workers append no empty ledger entries.
-- Invalid source/support/drop ids are filtered or rejected by code.
+- Invalid source/support/consolidation/drop ids are filtered or rejected by code.
 - Background worker errors are recorded on runtime state and surfaced in `/om:status`.
 - Compaction does not wait for background workers; it folds whatever ledger state is already present.
 - Historical or invalid coverage markers are tolerated by progress helpers instead of throwing.
@@ -340,6 +341,6 @@ V3 does not use V2 state shapes. Old V2 custom memory entries, old V2 compaction
 - Compaction is deterministic and model-free.
 - Observer input is raw/source entries only.
 - `coversUpToId` is a progress/projection watermark, not provenance.
-- Kept observations and reflections are rendered without paraphrase.
-- Dropped observations remain recallable from ledger history.
+- Kept observations and active reflections are rendered without paraphrase.
+- Dropped observations and superseded reflections remain recallable from ledger history.
 - Old V2 memory is ignored rather than migrated.

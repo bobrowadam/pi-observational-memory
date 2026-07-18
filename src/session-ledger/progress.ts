@@ -2,6 +2,7 @@ import { estimateEntryTokens } from "../tokens.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
 	type Entry,
 	type V3MemoryCustomType,
@@ -39,6 +40,7 @@ function isValidCoverageEntry(entry: Entry, customType: V3MemoryCustomType): ent
 
 	if (customType === OM_OBSERVATIONS_RECORDED) return isNonEmptyArray(entry.data.observations);
 	if (customType === OM_REFLECTIONS_RECORDED) return isNonEmptyArray(entry.data.reflections);
+	if (customType === OM_REFLECTIONS_CONSOLIDATED) return isNonEmptyArray(entry.data.entries);
 	return isNonEmptyArray(entry.data.observationIds);
 }
 

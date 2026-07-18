@@ -3,6 +3,7 @@ import { recallMemorySources, type Entry, type Observation, type Reflection } fr
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
 } from "../src/session-ledger/types.js";
 
@@ -63,6 +64,19 @@ function reflectionsEntry(id: string, reflections: Reflection[], coversUpToId = 
 		id,
 		customType: OM_REFLECTIONS_RECORDED,
 		data: { reflections, coversUpToId },
+	};
+}
+
+function consolidationsEntry(
+	id: string,
+	entries: Array<{ replacement: Reflection; supersededReflectionIds: string[] }>,
+	coversUpToId = "src-1",
+): Entry {
+	return {
+		type: "custom",
+		id,
+		customType: OM_REFLECTIONS_CONSOLIDATED,
+		data: { entries, coversUpToId },
 	};
 }
 
@@ -130,6 +144,73 @@ describe("session-ledger recall", () => {
 		expect(result.observations.map((match) => match.observation.id)).toEqual([OBS_1, OBS_2]);
 		expect(result.sourceEntries.map((entry) => entry.id)).toEqual(["src-1", "src-2"]);
 		expect(result.partial).toBe(false);
+	});
+
+	it("recalls historical superseded reflections and replacement lineage", () => {
+		const original = reflection({ id: REF_1, supportingObservationIds: [OBS_1] });
+		const replacement = reflection({ id: "ffffffffffff", supportingObservationIds: [OBS_1] });
+		const entries = [
+			sourceEntry("src-1"),
+			observationsEntry("obs-entry-1", [observation({ id: OBS_1, sourceEntryIds: ["src-1"] })]),
+			reflectionsEntry("ref-entry-1", [original]),
+			consolidationsEntry("consolidated-entry-1", [{ replacement, supersededReflectionIds: [original.id] }]),
+		];
+
+		const originalResult = recallMemorySources(entries, original.id);
+		const replacementResult = recallMemorySources(entries, replacement.id);
+
+		expect(originalResult.status).toBe("found");
+		expect(replacementResult.status).toBe("found");
+		if (originalResult.status !== "found" || replacementResult.status !== "found") return;
+		expect(originalResult.reflections[0]).toMatchObject({
+			status: "superseded",
+			supersededByReflectionIds: [replacement.id],
+		});
+		expect(replacementResult.reflections[0]).toMatchObject({
+			status: "active",
+			supersedesReflectionIds: [original.id],
+		});
+		expect(replacementResult.observations.map((match) => match.observation.id)).toEqual([OBS_1]);
+	});
+
+	it("ignores invalid consolidation lineage and reports valid lineage transitively", () => {
+		const original = reflection({ id: REF_1, supportingObservationIds: [OBS_1] });
+		const atomicReplacement = reflection({ id: "111111111111", supportingObservationIds: [OBS_1] });
+		const unknownReplacement = reflection({ id: "222222222222", supportingObservationIds: [OBS_1] });
+		const middle = reflection({ id: "ffffffffffff", supportingObservationIds: [OBS_1] });
+		const head = reflection({ id: "999999999999", supportingObservationIds: [OBS_1] });
+		const staleReplacement = reflection({ id: "888888888888", supportingObservationIds: [OBS_1] });
+		const entries = [
+			sourceEntry("src-1"),
+			observationsEntry("obs-entry-1", [observation({ id: OBS_1, sourceEntryIds: ["src-1"] })]),
+			reflectionsEntry("ref-entry-1", [original]),
+			consolidationsEntry("atomic-noop", [
+				{ replacement: atomicReplacement, supersededReflectionIds: [original.id] },
+				{ replacement: unknownReplacement, supersededReflectionIds: ["aaaaaaaa0000"] },
+			]),
+			consolidationsEntry("valid-middle", [{ replacement: middle, supersededReflectionIds: [original.id] }]),
+			consolidationsEntry("valid-head", [{ replacement: head, supersededReflectionIds: [middle.id] }]),
+			consolidationsEntry("stale-noop", [{ replacement: staleReplacement, supersededReflectionIds: [original.id] }]),
+			consolidationsEntry("reused-noop", [{ replacement: original, supersededReflectionIds: [head.id] }]),
+		];
+
+		const originalResult = recallMemorySources(entries, original.id);
+		const headResult = recallMemorySources(entries, head.id);
+
+		expect(recallMemorySources(entries, atomicReplacement.id).status).toBe("not_found");
+		expect(recallMemorySources(entries, unknownReplacement.id).status).toBe("not_found");
+		expect(recallMemorySources(entries, staleReplacement.id).status).toBe("not_found");
+		expect(originalResult.status).toBe("found");
+		expect(headResult.status).toBe("found");
+		if (originalResult.status !== "found" || headResult.status !== "found") return;
+		expect(originalResult.reflections[0]).toMatchObject({
+			status: "superseded",
+			supersededByReflectionIds: [middle.id, head.id],
+		});
+		expect(headResult.reflections[0]).toMatchObject({
+			status: "active",
+			supersedesReflectionIds: [middle.id, original.id],
+		});
 	});
 
 	it("marks supporting observations as dropped when recalling a reflection", () => {

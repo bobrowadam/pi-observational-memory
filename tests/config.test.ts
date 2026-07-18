@@ -41,8 +41,10 @@ describe("V3 config", () => {
 			compactAfterTokens: 81000,
 			compactAfterTokensMode: "calibrated",
 			compactAfterTokensRatio: 0.68,
-			observationsPoolMaxTokens: 20000,
-			observationsPoolTargetTokens: 10000,
+			observationsPoolMaxTokens: 10000,
+			observationsPoolTargetTokens: 5000,
+			reflectionsPoolMaxTokens: 3000,
+			reflectionsPoolTargetTokens: 2000,
 			agentMaxTurns: 16,
 			passive: false,
 			debugLog: false,
@@ -58,6 +60,8 @@ describe("V3 config", () => {
 				compactAfterTokens: 30,
 				observationsPoolMaxTokens: 40,
 				observationsPoolTargetTokens: 15,
+				reflectionsPoolMaxTokens: 30,
+				reflectionsPoolTargetTokens: 18,
 				agentMaxTurns: 5,
 				model: { provider: "anthropic", id: "global", thinking: "medium" },
 				passive: false,
@@ -77,6 +81,8 @@ describe("V3 config", () => {
 			compactAfterTokens: 30,
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 15,
+			reflectionsPoolMaxTokens: 30,
+			reflectionsPoolTargetTokens: 18,
 			agentMaxTurns: 5,
 			model: { provider: "openai", id: "project", thinking: "low" },
 			passive: true,
@@ -92,6 +98,8 @@ describe("V3 config", () => {
 				compactAfterTokens: 1.5,
 				observationsPoolMaxTokens: "20000",
 				observationsPoolTargetTokens: "10000",
+				reflectionsPoolMaxTokens: 0,
+				reflectionsPoolTargetTokens: 1.5,
 				agentMaxTurns: null,
 				model: { provider: "anthropic", id: "", thinking: "huge" },
 				passive: "yes",
@@ -112,6 +120,43 @@ describe("V3 config", () => {
 		expect(loadConfig(cwd, {})).toMatchObject({
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 20,
+		});
+	});
+
+	it("derives reflection target and rejects a target at or above the final max", () => {
+		writeJson(join(agentDir, "settings.json"), {
+			"observational-memory": {
+				reflectionsPoolMaxTokens: 120,
+				reflectionsPoolTargetTokens: 80,
+			},
+		});
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				reflectionsPoolMaxTokens: 60,
+			},
+		});
+
+		expect(loadConfig(cwd, {})).toMatchObject({
+			reflectionsPoolMaxTokens: 60,
+			reflectionsPoolTargetTokens: 40,
+		});
+	});
+
+	it("rejects a reflection pool max of 1 and accepts the minimum max of 2", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { reflectionsPoolMaxTokens: 1 },
+		});
+		expect(loadConfig(cwd, {})).toMatchObject({
+			reflectionsPoolMaxTokens: DEFAULTS.reflectionsPoolMaxTokens,
+			reflectionsPoolTargetTokens: DEFAULTS.reflectionsPoolTargetTokens,
+		});
+
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { reflectionsPoolMaxTokens: 2 },
+		});
+		expect(loadConfig(cwd, {})).toMatchObject({
+			reflectionsPoolMaxTokens: 2,
+			reflectionsPoolTargetTokens: 1,
 		});
 	});
 

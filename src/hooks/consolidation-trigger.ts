@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { runConsolidator } from "../agents/consolidator/agent.js";
+import { reflectionPoolMetrics } from "../agents/consolidator/pool.js";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
@@ -9,9 +11,11 @@ import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
+	buildReflectionsConsolidatedData,
 	buildReflectionsRecordedData,
 	earlierCoverageMarkerId,
 	foldLedger,
@@ -58,23 +62,37 @@ function appendEntry(pi: ExtensionAPI, customType: string, data: unknown): void 
 	pi.appendEntry(customType, data);
 }
 
-function mergeReflections(existing: Reflection[], additional: Reflection[]): Reflection[] {
-	const seen = new Set(existing.map((reflection) => reflection.id));
-	const merged = [...existing];
-	for (const reflection of additional) {
-		if (seen.has(reflection.id)) continue;
-		seen.add(reflection.id);
-		merged.push(reflection);
-	}
-	return merged;
+function reflectionPoolFingerprint(reflections: readonly Reflection[]): string {
+	return reflections.map((reflection) => reflection.id).sort().join(":");
+}
+
+function observationPoolFingerprint(observations: readonly { id: string }[]): string {
+	return observations.map((observation) => observation.id).sort().join(":");
 }
 
 function anyStageDue(entries: Entry[], runtime: Runtime): boolean {
+	const folded = foldLedger(entries);
+	const reflectionPool = reflectionPoolMetrics(
+		folded.activeReflections,
+		runtime.config.reflectionsPoolTargetTokens,
+		runtime.config.reflectionsPoolMaxTokens,
+	);
+	const reflectionPoolChanged = reflectionPoolFingerprint(folded.activeReflections)
+		!== runtime.consolidatorCooldownPoolFingerprint;
+	const observationPool = observationPoolMetrics(
+		folded.activeObservations,
+		runtime.config.observationsPoolTargetTokens,
+	);
+	const observationPoolOverMax = observationPool.observationTokens > runtime.config.observationsPoolMaxTokens;
+	const observationPoolChanged = observationPoolFingerprint(folded.activeObservations)
+		!== runtime.dropperCooldownPoolFingerprint;
 	return rawTokensSinceObservationCoverage(entries) >= runtime.config.observeAfterTokens
-		|| rawTokensSinceReflectionCoverage(entries) >= runtime.config.reflectAfterTokens;
+		|| rawTokensSinceReflectionCoverage(entries) >= runtime.config.reflectAfterTokens
+		|| (reflectionPool.overMax && reflectionPoolChanged)
+		|| (observationPoolOverMax && observationPoolChanged);
 }
 
-function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "dropper") => Promise<ResolvedModel | undefined> {
+function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "consolidator" | "dropper") => Promise<ResolvedModel | undefined> {
 	let cached: ResolveResult | undefined;
 	return async (stage) => {
 		cached ??= await runtime.resolveModel({
@@ -167,6 +185,14 @@ export async function runConsolidationPipeline(
 		if (reflectorResult.outcome === "abort") return;
 	} catch (error) {
 		debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
+		return;
+	}
+
+	runtime.consolidationPhase = "consolidator";
+	try {
+		await runConsolidatorStage(pi, runtime, ctx, resolveModel);
+	} catch (error) {
+		debugLog("consolidator.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "consolidator", error) });
 		return;
 	}
 
@@ -277,7 +303,8 @@ async function runReflectorStage(
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
-		reflections: folded.reflections,
+		reflections: folded.activeReflections,
+		historicalReflectionIds: folded.reflectionsById.keys(),
 		observations: folded.activeObservations,
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: runtime.config.model?.thinking ?? "low",
@@ -294,6 +321,55 @@ async function runReflectorStage(
 	};
 }
 
+async function runConsolidatorStage(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	ctx: ConsolidationCtx,
+	resolveModel: (stage: "consolidator") => Promise<ResolvedModel | undefined>,
+): Promise<StageOutcome> {
+	const entries = ctx.sessionManager.getBranch() as Entry[];
+	const folded = foldLedger(entries);
+	const metrics = reflectionPoolMetrics(
+		folded.activeReflections,
+		runtime.config.reflectionsPoolTargetTokens,
+		runtime.config.reflectionsPoolMaxTokens,
+	);
+	if (!metrics.overMax) return "continue";
+	const poolFingerprint = reflectionPoolFingerprint(folded.activeReflections);
+	if (runtime.consolidatorCooldownPoolFingerprint === poolFingerprint) {
+		debugLog("consolidator.cooldown", { activeReflectionCount: folded.activeReflections.length });
+		return "continue";
+	}
+
+	const coversUpToId = latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
+	if (!coversUpToId) return "continue";
+	if (ctx.hasUI) ctx.ui?.notify(
+		`Observational memory: consolidator running — active reflection pool ~${metrics.reflectionTokens.toLocaleString()} / ${metrics.targetTokens.toLocaleString()} target tokens`,
+		"info",
+	);
+	const resolved = await resolveModel("consolidator");
+	if (!resolved) return "abort";
+
+	const consolidations = await runConsolidator({
+		model: resolved.model as any,
+		apiKey: resolved.apiKey,
+		headers: resolved.headers,
+		reflections: folded.activeReflections,
+		historicalReflectionIds: folded.reflectionsById.keys(),
+		targetTokens: runtime.config.reflectionsPoolTargetTokens,
+		maxTurns: runtime.config.agentMaxTurns,
+		thinkingLevel: runtime.config.model?.thinking ?? "low",
+	});
+	const data = consolidations ? buildReflectionsConsolidatedData(consolidations, coversUpToId) : undefined;
+	if (!data) {
+		runtime.consolidatorCooldownPoolFingerprint = poolFingerprint;
+		return "continue";
+	}
+	runtime.consolidatorCooldownPoolFingerprint = undefined;
+	appendEntry(pi, OM_REFLECTIONS_CONSOLIDATED, data);
+	return "continue";
+}
+
 async function runDropperStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
@@ -302,17 +378,28 @@ async function runDropperStage(
 	sameRunReflections: Reflection[],
 	sameRunReflectionCoverageId: string | undefined,
 ): Promise<StageOutcome> {
-	if (!sameRunReflectionCoverageId || sameRunReflections.length === 0) {
-		debugLog("dropper.waiting_for_reflection", { sameRunReflections: sameRunReflections.length });
-		return "continue";
-	}
-
 	const entries = ctx.sessionManager.getBranch() as Entry[];
 	const observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
 	if (!observationCoverageId) return "continue";
 
 	const folded = foldLedger(entries);
 	const metrics = observationPoolMetrics(folded.activeObservations, runtime.config.observationsPoolTargetTokens);
+	const poolFingerprint = observationPoolFingerprint(folded.activeObservations);
+	const hasSameRunReflection = sameRunReflectionCoverageId !== undefined && sameRunReflections.length > 0;
+	const pressureOnly = !hasSameRunReflection;
+	const overMax = metrics.observationTokens > runtime.config.observationsPoolMaxTokens;
+	if (pressureOnly && !overMax) {
+		debugLog("dropper.waiting_for_reflection", {
+			sameRunReflections: sameRunReflections.length,
+			observationTokens: metrics.observationTokens,
+			maxTokens: runtime.config.observationsPoolMaxTokens,
+		});
+		return "continue";
+	}
+	if (pressureOnly && runtime.dropperCooldownPoolFingerprint === poolFingerprint) {
+		debugLog("dropper.cooldown", { activeObservationCount: folded.activeObservations.length });
+		return "continue";
+	}
 	if (!metrics.ready) {
 		debugLog("dropper.not_ready", {
 			observationTokens: metrics.observationTokens,
@@ -329,6 +416,7 @@ async function runDropperStage(
 		observationCoverageId,
 		sameRunReflectionCoverageId,
 		sameRunReflectionCount: sameRunReflections.length,
+		pressureOnly,
 		activeObservationCount: metrics.activeObservationCount,
 		observationTokens: metrics.observationTokens,
 		targetTokens: metrics.targetTokens,
@@ -338,31 +426,39 @@ async function runDropperStage(
 	});
 
 	if (ctx.hasUI) ctx.ui?.notify(
-		`Observational memory: dropper running after reflection — active observation pool ~${metrics.observationTokens.toLocaleString()} / ${metrics.targetTokens.toLocaleString()} target tokens (${Math.round(metrics.fullness * 100).toLocaleString()}%)`,
+		`Observational memory: dropper running${pressureOnly ? " under pool pressure" : " after reflection"} — active observation pool ~${metrics.observationTokens.toLocaleString()} / ${metrics.targetTokens.toLocaleString()} target tokens (${Math.round(metrics.fullness * 100).toLocaleString()}%)`,
 		"info",
 	);
 	const resolved = await resolveModel("dropper");
 	if (!resolved) return "abort";
 
-	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
 	const droppedIds = await runDropper({
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
-		reflections: reflectionsForDropper,
+		reflections: folded.activeReflections,
 		observations: folded.activeObservations,
 		targetTokens: runtime.config.observationsPoolTargetTokens,
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: runtime.config.model?.thinking ?? "low",
 	});
-	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
-	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
+	const reflectionCoverageId = sameRunReflectionCoverageId
+		?? latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
+	const coversUpToId = reflectionCoverageId
+		? earlierCoverageMarkerId(entries, observationCoverageId, reflectionCoverageId) ?? observationCoverageId
+		: observationCoverageId;
+	const data = droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
 	debugLog("dropper.append", {
 		droppedIdsCount: droppedIds?.length ?? 0,
 		coversUpToId,
 		dataBuilt: data !== undefined,
 		appended: data !== undefined,
 	});
-	if (data) appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
+	if (data) {
+		runtime.dropperCooldownPoolFingerprint = undefined;
+		appendEntry(pi, OM_OBSERVATIONS_DROPPED, data);
+	} else if (pressureOnly) {
+		runtime.dropperCooldownPoolFingerprint = poolFingerprint;
+	}
 	return "continue";
 }

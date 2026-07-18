@@ -3,17 +3,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockAgents = vi.hoisted(() => ({
 	runObserver: vi.fn(),
 	runReflector: vi.fn(),
+	runConsolidator: vi.fn(),
 	runDropper: vi.fn(),
 }));
 
 vi.mock("../src/agents/observer/agent.js", () => ({ runObserver: mockAgents.runObserver }));
 vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.runReflector }));
+vi.mock("../src/agents/consolidator/agent.js", () => ({ runConsolidator: mockAgents.runConsolidator }));
 vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
 
+import { hashId } from "../src/ids.js";
 import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
 } from "../src/session-ledger/index.js";
 import {
@@ -21,6 +25,7 @@ import {
 	observationsDroppedEntry,
 	observationsRecordedEntry,
 	reflection,
+	reflectionsConsolidatedEntry,
 	reflectionsRecordedEntry,
 	textCustomMessage,
 	type TestEntry,
@@ -29,9 +34,11 @@ import {
 beforeEach(() => {
 	mockAgents.runObserver.mockReset();
 	mockAgents.runReflector.mockReset();
+	mockAgents.runConsolidator.mockReset();
 	mockAgents.runDropper.mockReset();
 	mockAgents.runObserver.mockResolvedValue(undefined);
 	mockAgents.runReflector.mockResolvedValue(undefined);
+	mockAgents.runConsolidator.mockResolvedValue(undefined);
 	mockAgents.runDropper.mockResolvedValue(undefined);
 });
 
@@ -41,6 +48,8 @@ function setup(args: {
 	reflectAfterTokens?: number;
 	observationsPoolMaxTokens?: number;
 	observationsPoolTargetTokens?: number;
+	reflectionsPoolMaxTokens?: number;
+	reflectionsPoolTargetTokens?: number;
 	passive?: boolean;
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
@@ -66,15 +75,20 @@ function setup(args: {
 			reflectAfterTokens: args.reflectAfterTokens ?? 1,
 			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 100,
 			observationsPoolTargetTokens: args.observationsPoolTargetTokens ?? Math.floor((args.observationsPoolMaxTokens ?? 100) / 2),
+			reflectionsPoolMaxTokens: args.reflectionsPoolMaxTokens ?? 3_000,
+			reflectionsPoolTargetTokens: args.reflectionsPoolTargetTokens ?? 2_000,
 			agentMaxTurns: 9,
 			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
-		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
+		consolidationPhase: undefined as "observer" | "reflector" | "consolidator" | "dropper" | undefined,
 		resolveFailureNotified: false,
 		lastObserverError: undefined as string | undefined,
 		lastReflectorError: undefined as string | undefined,
+		lastConsolidatorError: undefined as string | undefined,
 		lastDropperError: undefined as string | undefined,
+		consolidatorCooldownPoolFingerprint: undefined as string | undefined,
+		dropperCooldownPoolFingerprint: undefined as string | undefined,
 		ensureConfig: vi.fn(),
 		resolveModel: vi.fn(async () => ({ ok: true, model: { reasoning: true }, apiKey: "key", headers: { h: "v" } })),
 		launchConsolidationTask: vi.fn((_ctx, work) => {
@@ -82,10 +96,11 @@ function setup(args: {
 			launchedWork = work;
 			return Promise.resolve();
 		}),
-		recordConsolidationStageError: vi.fn((ctx, phase: "observer" | "reflector" | "dropper", error: unknown) => {
+		recordConsolidationStageError: vi.fn((ctx, phase: "observer" | "reflector" | "consolidator" | "dropper", error: unknown) => {
 			const message = error instanceof Error ? error.message : String(error);
 			if (phase === "observer") runtime.lastObserverError = message;
 			if (phase === "reflector") runtime.lastReflectorError = message;
+			if (phase === "consolidator") runtime.lastConsolidatorError = message;
 			if (phase === "dropper") runtime.lastDropperError = message;
 			ctx.ui?.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
 			return message;
@@ -109,7 +124,12 @@ function setup(args: {
 		fire: (eventName = "turn_end") => handlers[eventName]!(undefined, ctx),
 		fireAgentStart: () => handlers.agent_start!(undefined, ctx),
 		fireTurnEnd: () => handlers.turn_end!(undefined, ctx),
-		runLaunchedWork: async () => launchedWork?.(),
+		runLaunchedWork: async () => {
+			const work = launchedWork;
+			launchedWork = undefined;
+			await work?.();
+			runtime.consolidationInFlight = false;
+		},
 		getEntries: () => entries,
 	};
 }
@@ -138,6 +158,25 @@ describe("V3 consolidation trigger", () => {
 
 		fireAgentStart();
 		fireTurnEnd();
+
+		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
+	});
+
+	it("does not launch for reflection pool pressure at exactly max", () => {
+		const atMax = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { tokenCount: 3_000 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref", { reflections: [atMax], coversUpToId: "raw-1" }),
+		];
+		const { fire, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 999,
+			reflectionsPoolMaxTokens: 3_000,
+		});
+
+		fire();
 
 		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
 	});
@@ -288,6 +327,56 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-1" });
 	});
 
+	it("rejects a superseded historical duplicate without appending it or unlocking dropper", async () => {
+		const supersededContent = "Superseded durable fact.";
+		const superseded = reflection(hashId(supersededContent), ["aaaaaaaaaaaa"], { content: supersededContent });
+		const active = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { content: "Active durable fact." });
+		const actualReflector = await vi.importActual<typeof import("../src/agents/reflector/agent.js")>("../src/agents/reflector/agent.js");
+		let passedHistoricalIds: string[] = [];
+		mockAgents.runReflector.mockImplementationOnce(async (args) => {
+			passedHistoricalIds = Array.from(args.historicalReflectionIds);
+			return actualReflector.runReflector({
+				...args,
+				historicalReflectionIds: passedHistoricalIds,
+				agentLoop: ((_prompts: unknown, context: any) => ({
+					async *[Symbol.asyncIterator]() {},
+					result: async () => {
+						await context.tools[0].execute("tool-1", {
+							reflections: [{ content: supersededContent, supportingObservationIds: [obsA.id] }],
+						});
+						return {};
+					},
+				})) as any,
+			});
+		});
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref", { reflections: [superseded], coversUpToId: "raw-1" }),
+			reflectionsConsolidatedEntry("om-consolidated", {
+				entries: [{ replacement: active, supersededReflectionIds: [superseded.id] }],
+				coversUpToId: "raw-1",
+			}),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+		];
+		const { fire, runLaunchedWork, pi } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 1,
+			observationsPoolTargetTokens: 5,
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runReflector).toHaveBeenCalledOnce();
+		const reflectorArgs = mockAgents.runReflector.mock.calls[0][0];
+		expect(reflectorArgs.reflections).toEqual([active]);
+		expect(passedHistoricalIds).toEqual([superseded.id, active.id]);
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(mockAgents.runDropper).not.toHaveBeenCalled();
+	});
+
 	it("runs dropper after same-run non-empty reflector output and appends non-empty drops", async () => {
 		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
 		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
@@ -308,17 +397,132 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry.mock.calls[1]).toEqual([OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" }]);
 	});
 
-	it("does not launch dropper-only work when active pool is over target", () => {
+	it("does not launch dropper-only work when active pool is over target but below max", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaaaaaa"),
 			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
 			reflectionsRecordedEntry("om-ref", { reflections: [refA], coversUpToId: "raw-1" }),
 		];
-		const { fire, runtime } = setup({ entries, observeAfterTokens: 999, reflectAfterTokens: 999, observationsPoolTargetTokens: 5 });
+		const { fire, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 999,
+			observationsPoolMaxTokens: 11,
+			observationsPoolTargetTokens: 5,
+		});
 
 		fire();
 
 		expect(runtime.launchConsolidationTask).not.toHaveBeenCalled();
+	});
+
+	it("launches pressure-only dropper work over max and appends drops without reflection coverage", async () => {
+		const heavy = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 101 });
+		mockAgents.runDropper.mockResolvedValueOnce([heavy.id]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [heavy], coversUpToId: "raw-1" }),
+		];
+		const { fire, runLaunchedWork, pi, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 999,
+			observationsPoolMaxTokens: 100,
+			observationsPoolTargetTokens: 50,
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runReflector).not.toHaveBeenCalled();
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({
+			reflections: [],
+			observations: [heavy],
+			targetTokens: 50,
+		}));
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_DROPPED, {
+			observationIds: [heavy.id],
+			coversUpToId: "raw-1",
+		});
+	});
+
+	it("cools down pressure-only no-progress drops for an unchanged active pool", async () => {
+		const heavy = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 101 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [heavy], coversUpToId: "raw-1" }),
+		];
+		const { fire, runLaunchedWork, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 999,
+			observationsPoolMaxTokens: 100,
+			observationsPoolTargetTokens: 50,
+		});
+
+		fire();
+		await runLaunchedWork();
+		fire();
+
+		expect(mockAgents.runDropper).toHaveBeenCalledTimes(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+		expect(runtime.dropperCooldownPoolFingerprint).toBe(heavy.id);
+	});
+
+	it("retries a cooled-down over-max pool after a same-run reflection", async () => {
+		const heavy = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 101 });
+		const newRef = reflection("ffffffffffff", [heavy.id]);
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [heavy], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+		];
+		const { fire, runLaunchedWork, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 1,
+			observationsPoolMaxTokens: 100,
+			observationsPoolTargetTokens: 50,
+		});
+		runtime.dropperCooldownPoolFingerprint = heavy.id;
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runReflector).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runDropper).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({
+			reflections: [newRef],
+			observations: [heavy],
+		}));
+	});
+
+	it("retries pressure-only drops after the active observation pool changes", async () => {
+		const heavy = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 101 });
+		const added = observation("dddddddddddd", { sourceEntryIds: ["raw-1"], tokenCount: 1 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [heavy], coversUpToId: "raw-1" }),
+		];
+		const { fire, runLaunchedWork, pi, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 999,
+			observationsPoolMaxTokens: 100,
+			observationsPoolTargetTokens: 50,
+		});
+
+		fire();
+		await runLaunchedWork();
+		pi.appendEntry(OM_OBSERVATIONS_RECORDED, { observations: [added], coversUpToId: "raw-1" });
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(2);
+		expect(mockAgents.runDropper).toHaveBeenCalledTimes(2);
+		expect(mockAgents.runDropper).toHaveBeenLastCalledWith(expect.objectContaining({ observations: [heavy, added] }));
 	});
 
 	it("waits for successful reflection even when active observation pool is over target", async () => {
@@ -439,6 +643,116 @@ describe("V3 consolidation trigger", () => {
 		await runLaunchedWork();
 
 		expect(pi.appendEntry.mock.calls[1]).toEqual([OM_OBSERVATIONS_DROPPED, { observationIds: ["bbbbbbbbbbbb"], coversUpToId: "raw-2" }]);
+	});
+
+	it("launches consolidator-only work when the active reflection pool is strictly over max", async () => {
+		const refB = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { tokenCount: 1_600 });
+		const refC = reflection("111111111111", ["aaaaaaaaaaaa"], { tokenCount: 1_500 });
+		const replacement = reflection("222222222222", ["aaaaaaaaaaaa"], { tokenCount: 1_000 });
+		mockAgents.runConsolidator.mockResolvedValueOnce([{
+			replacement,
+			supersededReflectionIds: [refB.id, refC.id],
+		}]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref", { reflections: [refB, refC], coversUpToId: "raw-1" }),
+		];
+		const { fire, runLaunchedWork, pi, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 999,
+			reflectionsPoolMaxTokens: 3_000,
+			reflectionsPoolTargetTokens: 2_000,
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+		expect(mockAgents.runReflector).not.toHaveBeenCalled();
+		expect(mockAgents.runConsolidator).toHaveBeenCalledWith(expect.objectContaining({
+			reflections: [refB, refC],
+			targetTokens: 2_000,
+		}));
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_REFLECTIONS_CONSOLIDATED, {
+			entries: [{ replacement, supersededReflectionIds: [refB.id, refC.id] }],
+			coversUpToId: "raw-1",
+		});
+	});
+
+	it("cools down unchanged irreducible over-max reflection pools and retries after the active set changes", async () => {
+		const refB = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { tokenCount: 1_600 });
+		const refC = reflection("111111111111", ["aaaaaaaaaaaa"], { tokenCount: 1_500 });
+		const refD = reflection("222222222222", ["aaaaaaaaaaaa"], { tokenCount: 1 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaaaaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref", { reflections: [refB, refC], coversUpToId: "raw-1" }),
+		];
+		const { fire, runLaunchedWork, pi, runtime } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 999,
+			reflectionsPoolMaxTokens: 3_000,
+			reflectionsPoolTargetTokens: 2_000,
+		});
+
+		fire();
+		await runLaunchedWork();
+		fire();
+
+		expect(mockAgents.runConsolidator).toHaveBeenCalledTimes(1);
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(1);
+
+		pi.appendEntry(OM_REFLECTIONS_RECORDED, { reflections: [refD], coversUpToId: "raw-1" });
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(2);
+		expect(mockAgents.runConsolidator).toHaveBeenCalledTimes(2);
+		expect(mockAgents.runConsolidator).toHaveBeenLastCalledWith(expect.objectContaining({
+			reflections: [refB, refC, refD],
+		}));
+	});
+
+	it("re-folds after reflector, consolidates before dropper, and never reintroduces superseded reflections", async () => {
+		const existing = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { tokenCount: 4 });
+		const newRef = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { tokenCount: 4 });
+		const replacement = reflection("111111111111", ["aaaaaaaaaaaa"], { tokenCount: 2 });
+		mockAgents.runReflector.mockResolvedValueOnce([newRef]);
+		mockAgents.runConsolidator.mockResolvedValueOnce([{
+			replacement,
+			supersededReflectionIds: [existing.id, newRef.id],
+		}]);
+		mockAgents.runDropper.mockResolvedValueOnce(["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-ref", { reflections: [existing], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			observationsRecordedEntry("om-obs", { observations: [obsA], coversUpToId: "raw-2" }),
+		];
+		const { fire, runLaunchedWork, pi } = setup({
+			entries,
+			observeAfterTokens: 999,
+			reflectAfterTokens: 1,
+			observationsPoolTargetTokens: 5,
+			reflectionsPoolMaxTokens: 5,
+			reflectionsPoolTargetTokens: 3,
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runConsolidator).toHaveBeenCalledWith(expect.objectContaining({ reflections: [existing, newRef] }));
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [replacement] }));
+		expect(mockAgents.runReflector.mock.invocationCallOrder[0]).toBeLessThan(mockAgents.runConsolidator.mock.invocationCallOrder[0]);
+		expect(mockAgents.runConsolidator.mock.invocationCallOrder[0]).toBeLessThan(mockAgents.runDropper.mock.invocationCallOrder[0]);
+		expect(pi.appendEntry.mock.calls.map((call) => call[0])).toEqual([
+			OM_REFLECTIONS_RECORDED,
+			OM_REFLECTIONS_CONSOLIDATED,
+			OM_OBSERVATIONS_DROPPED,
+		]);
 	});
 
 	it("appends no empty reflection or drop entries", async () => {

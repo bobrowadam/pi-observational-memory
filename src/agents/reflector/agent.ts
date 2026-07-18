@@ -22,6 +22,7 @@ interface RunReflectorArgs {
 	apiKey: string;
 	headers?: Record<string, string>;
 	reflections: Reflection[];
+	historicalReflectionIds: Iterable<string>;
 	observations: Observation[];
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
@@ -114,7 +115,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	});
 
 	const allowedObservationIds = observations.map((observation) => observation.id);
-	const existingReflectionIds = new Set(reflections.map((reflection) => reflection.id));
+	const historicalReflectionIds = new Set(args.historicalReflectionIds);
+	for (const reflection of reflections) historicalReflectionIds.add(reflection.id);
 	const accumulated = new Map<string, Reflection>();
 	let toolCallCount = 0;
 	let rawProposedReflectionCount = 0;
@@ -141,7 +143,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 					continue;
 				}
 				const id = hashId(content);
-				if (existingReflectionIds.has(id) || accumulated.has(id)) {
+				if (historicalReflectionIds.has(id) || accumulated.has(id)) {
 					duplicates++;
 					continue;
 				}

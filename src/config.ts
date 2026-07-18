@@ -38,6 +38,8 @@ export interface Config {
 	compactAfterTokensRatio: number;
 	observationsPoolMaxTokens: number;
 	observationsPoolTargetTokens: number;
+	reflectionsPoolMaxTokens: number;
+	reflectionsPoolTargetTokens: number;
 	agentMaxTurns: number;
 	model?: ConfiguredModel;
 	passive: boolean;
@@ -50,8 +52,10 @@ export const DEFAULTS: Config = {
 	compactAfterTokens: 81_000,
 	compactAfterTokensMode: "calibrated",
 	compactAfterTokensRatio: 0.68,
-	observationsPoolMaxTokens: 20_000,
-	observationsPoolTargetTokens: 10_000,
+	observationsPoolMaxTokens: 10_000,
+	observationsPoolTargetTokens: 5_000,
+	reflectionsPoolMaxTokens: 3_000,
+	reflectionsPoolTargetTokens: 2_000,
 	agentMaxTurns: 16,
 	passive: false,
 	debugLog: false,
@@ -85,6 +89,11 @@ function positiveIntegerOrUndefined(value: unknown): number | undefined {
 	return Number.isInteger(value) && typeof value === "number" && value > 0 ? value : undefined;
 }
 
+function integerAtLeastOrUndefined(value: unknown, minimum: number): number | undefined {
+	const integer = positiveIntegerOrUndefined(value);
+	return integer !== undefined && integer >= minimum ? integer : undefined;
+}
+
 function validTargetOrUndefined(value: unknown, maxTokens: number): number | undefined {
 	const target = positiveIntegerOrUndefined(value);
 	return target !== undefined && target < maxTokens ? target : undefined;
@@ -92,6 +101,10 @@ function validTargetOrUndefined(value: unknown, maxTokens: number): number | und
 
 function derivedObservationPoolTarget(maxTokens: number): number {
 	return Math.floor(maxTokens / 2);
+}
+
+function derivedReflectionPoolTarget(maxTokens: number): number {
+	return Math.max(1, Math.floor(maxTokens * 2 / 3));
 }
 
 function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
@@ -137,10 +150,14 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 		"compactAfterTokens",
 		"observationsPoolMaxTokens",
 		"observationsPoolTargetTokens",
+		"reflectionsPoolMaxTokens",
+		"reflectionsPoolTargetTokens",
 		"agentMaxTurns",
 	] as const;
 	for (const key of numberKeys) {
-		const normalizedValue = positiveIntegerOrUndefined(value[key]);
+		const normalizedValue = key === "reflectionsPoolMaxTokens"
+			? integerAtLeastOrUndefined(value[key], 2)
+			: positiveIntegerOrUndefined(value[key]);
 		if (normalizedValue !== undefined) normalized[key] = normalizedValue;
 	}
 	if (isCompactAfterTokensMode(value.compactAfterTokensMode)) {
@@ -184,17 +201,23 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): C
 	const merged = {
 		...DEFAULTS,
 		observationsPoolTargetTokens: undefined,
+		reflectionsPoolTargetTokens: undefined,
 		...globalConfig,
 		...projectConfig,
 		...envConfig,
 	};
-	const target = validTargetOrUndefined(
+	const observationsTarget = validTargetOrUndefined(
 		merged.observationsPoolTargetTokens,
 		merged.observationsPoolMaxTokens,
 	) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
+	const reflectionsTarget = validTargetOrUndefined(
+		merged.reflectionsPoolTargetTokens,
+		merged.reflectionsPoolMaxTokens,
+	) ?? derivedReflectionPoolTarget(merged.reflectionsPoolMaxTokens);
 
 	return {
 		...merged,
-		observationsPoolTargetTokens: target,
+		observationsPoolTargetTokens: observationsTarget,
+		reflectionsPoolTargetTokens: reflectionsTarget,
 	};
 }

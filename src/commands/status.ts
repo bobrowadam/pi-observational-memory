@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { reflectionPoolMetrics } from "../agents/consolidator/pool.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { resolveCompactAfterTokens } from "../config.js";
 import type { Runtime } from "../runtime.js";
@@ -48,6 +49,11 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			const visibleObservationTokens = tokenSum(visible.observations);
 			const visibleReflectionTokens = tokenSum(visible.reflections);
 			const activeObservationPool = observationPoolMetrics(folded.activeObservations, runtime.config.observationsPoolTargetTokens);
+			const activeReflectionPool = reflectionPoolMetrics(
+				folded.activeReflections,
+				runtime.config.reflectionsPoolTargetTokens,
+				runtime.config.reflectionsPoolMaxTokens,
+			);
 			const observationLine = appendSuffixes(
 				`Observations: ${folded.observations.length} recorded / ${folded.droppedObservationIds.size} dropped / ${folded.activeObservations.length} active / ${visible.observations.length} visible`,
 				[
@@ -56,8 +62,11 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				],
 			);
 			const reflectionLine = appendSuffixes(
-				`Reflections:  ${folded.reflections.length} recorded / ${visible.reflections.length} visible`,
-				[addedSuffix(drift.reflectionsOnlyInFull.length)],
+				`Reflections:  ${folded.reflections.length} recorded / ${folded.supersededReflectionIds.size} superseded / ${folded.activeReflections.length} active / ${visible.reflections.length} visible`,
+				[
+					addedSuffix(drift.reflectionsOnlyInFull.length),
+					removedSuffix(drift.reflectionsOnlyInVisible.length),
+				],
 			);
 			const obsProgress = rawTokensSinceObservationCoverage(entries);
 			const reflectionProgress = rawTokensSinceReflectionCoverage(entries);
@@ -83,9 +92,10 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				`Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
 				`Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
 				`Next compaction:  ~${compactionProgress.toLocaleString()} / ${compactThreshold.toLocaleString()} tokens (${pct(compactionProgress, compactThreshold)}%)`,
-				`Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
-				`Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
-				`Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`,
+				`Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} full-fold trigger tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
+				`Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} desired / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} maintenance trigger tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolMaxTokens)}% of trigger)`,
+				`Visible reflection pool: ~${visibleReflectionTokens.toLocaleString()} tokens`,
+				`Active reflection pool:  ~${activeReflectionPool.reflectionTokens.toLocaleString()} / ${activeReflectionPool.targetTokens.toLocaleString()} target / ${activeReflectionPool.maxTokens.toLocaleString()} max tokens (${pct(activeReflectionPool.reflectionTokens, activeReflectionPool.maxTokens)}%)`,
 			];
 
 			if (runtime.consolidationInFlight || runtime.compactInFlight || runtime.compactHookInFlight) {
@@ -98,10 +108,11 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				if (runtime.compactHookInFlight) lines.push("Compaction hook: running");
 			}
 
-			if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastDropperError) {
+			if (runtime.lastObserverError || runtime.lastReflectorError || runtime.lastConsolidatorError || runtime.lastDropperError) {
 				lines.push("", "── Last error ──");
 				if (runtime.lastObserverError) lines.push(`Observer: ${runtime.lastObserverError}`);
 				if (runtime.lastReflectorError) lines.push(`Reflector: ${runtime.lastReflectorError}`);
+				if (runtime.lastConsolidatorError) lines.push(`Consolidator: ${runtime.lastConsolidatorError}`);
 				if (runtime.lastDropperError) lines.push(`Dropper: ${runtime.lastDropperError}`);
 			}
 

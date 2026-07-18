@@ -27,6 +27,7 @@ describe("V3 reflector agent", () => {
 		model: {} as any,
 		apiKey: "test",
 		reflections: [],
+		historicalReflectionIds: [] as string[],
 		observations: [obsA, obsB],
 	};
 
@@ -202,6 +203,29 @@ describe("V3 reflector agent", () => {
 		const result = await runReflector({ ...baseArgs, reflections: [existing], agentLoop: loop });
 
 		expect(result?.map((item) => item.content)).toEqual(["New durable fact."]);
+	});
+
+	it("rejects ids belonging to superseded historical reflections without prompting with them", async () => {
+		const historicalContent = "Superseded durable fact.";
+		let userText = "";
+		const loop = fakeAgentLoop(async (prompts, context) => {
+			userText = prompts[0].content[0].text;
+			await context.tools[0].execute("tool-1", {
+				reflections: [{ content: historicalContent, supportingObservationIds: ["aaaaaaaaaaaa"] }],
+			});
+		});
+
+		const active = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { content: "Active durable fact." });
+		const result = await runReflector({
+			...baseArgs,
+			reflections: [active],
+			historicalReflectionIds: [hashId(historicalContent), active.id],
+			agentLoop: loop,
+		});
+
+		expect(userText).toContain("Active durable fact.");
+		expect(userText).not.toContain(historicalContent);
+		expect(result).toBeUndefined();
 	});
 
 	it("returns undefined when no tool call records reflections", async () => {

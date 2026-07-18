@@ -1,9 +1,12 @@
 import {
 	isObservationsDroppedData,
 	isObservationsRecordedData,
+	isApplicableReflectionsConsolidatedData,
+	isReflectionsConsolidatedData,
 	isReflectionsRecordedData,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
 	type Entry,
 	type Observation,
@@ -22,8 +25,12 @@ export type FoldedLedger = {
 	activeObservations: Observation[];
 	/** Tombstoned observation ids, including ids that may not have a corresponding folded observation. */
 	droppedObservationIds: Set<string>;
-	/** All first-valid reflection records encountered through the fold boundary. */
+	/** All first-valid reflection records encountered through the fold boundary, including superseded reflections. */
 	reflections: Reflection[];
+	/** Reflection records not superseded by a folded consolidation entry. */
+	activeReflections: Reflection[];
+	/** Superseded reflection ids, including ids that may not have a corresponding folded reflection. */
+	supersededReflectionIds: Set<string>;
 	/** All first-valid observation records by id, including dropped observations. */
 	observationsById: Map<string, Observation>;
 	/** All first-valid reflection records by id. */
@@ -51,6 +58,7 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 	const observationsById = new Map<string, Observation>();
 	const reflectionsById = new Map<string, Reflection>();
 	const droppedObservationIds = new Set<string>();
+	const supersededReflectionIds = new Set<string>();
 	const endIdx = foldEndIndex(entries, options.upToEntryId);
 
 	for (let i = 0; i <= endIdx; i++) {
@@ -77,6 +85,20 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 			continue;
 		}
 
+		if (isCustomEntry(entry, OM_REFLECTIONS_CONSOLIDATED)) {
+			if (
+				!isReflectionsConsolidatedData(entry.data) ||
+				!isApplicableReflectionsConsolidatedData(entry.data, reflectionsById, supersededReflectionIds)
+			) continue;
+			for (const consolidation of entry.data.entries) {
+				reflectionsById.set(consolidation.replacement.id, consolidation.replacement);
+				for (const reflectionId of consolidation.supersededReflectionIds) {
+					supersededReflectionIds.add(reflectionId);
+				}
+			}
+			continue;
+		}
+
 		if (isCustomEntry(entry, OM_OBSERVATIONS_DROPPED)) {
 			if (!isObservationsDroppedData(entry.data)) continue;
 			for (const observationId of entry.data.observationIds) {
@@ -88,12 +110,15 @@ export function foldLedger(entries: Entry[], options: FoldLedgerOptions = {}): F
 	const observations = Array.from(observationsById.values());
 	const activeObservations = observations.filter((observation) => !droppedObservationIds.has(observation.id));
 	const reflections = Array.from(reflectionsById.values());
+	const activeReflections = reflections.filter((reflection) => !supersededReflectionIds.has(reflection.id));
 
 	return {
 		observations,
 		activeObservations,
 		droppedObservationIds,
 		reflections,
+		activeReflections,
+		supersededReflectionIds,
 		observationsById,
 		reflectionsById,
 	};

@@ -14,6 +14,7 @@ import {
 	oldV2ObservationEntry,
 	rawMessage,
 	reflection,
+	reflectionsConsolidatedEntry,
 	reflectionsRecordedEntry,
 	type TestEntry,
 } from "./fixtures/session.js";
@@ -94,6 +95,29 @@ describe("V3 recall tool", () => {
 		expect(text).toContain("Observations:");
 		expect(text).toContain("Sources:");
 		expect(text).toContain("I like tea.");
+	});
+
+	it("exposes superseded reflection status and lineage", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] });
+		const original = reflection("eeeeeeeeeeee", [obs.id], { content: "Original durable fact." });
+		const replacement = reflection("ffffffffffff", [obs.id], { content: "Consolidated durable fact." });
+		const entries = [
+			rawMessage("raw-1", "source"),
+			observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-ref", { reflections: [original], coversUpToId: "raw-1" }),
+			reflectionsConsolidatedEntry("om-consolidated", {
+				entries: [{ replacement, supersededReflectionIds: [original.id] }],
+				coversUpToId: "raw-1",
+			}),
+		];
+
+		const { result, text } = await execute(original.id, entries);
+
+		expect(result.details?.reflections[0]).toMatchObject({
+			status: "superseded",
+			supersededByReflectionIds: [replacement.id],
+		});
+		expect(text).toContain(`[${original.id}] [superseded] [superseded by: ${replacement.id}] Original durable fact.`);
 	});
 
 	it("reports missing sources as partial", async () => {

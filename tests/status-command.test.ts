@@ -10,6 +10,7 @@ import {
 	oldV2CompactionDetails,
 	oldV2ObservationEntry,
 	reflection,
+	reflectionsConsolidatedEntry,
 	reflectionsRecordedEntry,
 	textCustomMessage,
 	type TestEntry,
@@ -23,24 +24,28 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; model?: unk
 			handler = command.handler;
 		}),
 	};
+	const defaultConfig = {
+		observeAfterTokens: 10,
+		reflectAfterTokens: 20,
+		compactAfterTokens: 30,
+		observationsPoolMaxTokens: 40,
+		observationsPoolTargetTokens: 20,
+		reflectionsPoolMaxTokens: 30,
+		reflectionsPoolTargetTokens: 20,
+		passive: false,
+	};
 	const runtime = {
 		ensureConfig: vi.fn(),
-		config: {
-			observeAfterTokens: 10,
-			reflectAfterTokens: 20,
-			compactAfterTokens: 30,
-			observationsPoolMaxTokens: 40,
-			observationsPoolTargetTokens: 20,
-			passive: false,
-		},
 		consolidationInFlight: false,
 		consolidationPhase: undefined,
 		compactInFlight: false,
 		compactHookInFlight: false,
 		lastObserverError: undefined,
 		lastReflectorError: undefined,
+		lastConsolidatorError: undefined,
 		lastDropperError: undefined,
 		...args.runtime,
+		config: { ...defaultConfig, ...args.runtime?.config },
 	};
 	registerStatusCommand(pi as any, runtime as any);
 	if (!handler) throw new Error("status handler not registered");
@@ -59,7 +64,7 @@ describe("V3 /om:status", () => {
 
 		expect(output).toContain("── Memory ──");
 		expect(output).toContain("Observations: 0 recorded / 0 dropped / 0 active / 0 visible");
-		expect(output).toContain("Reflections:  0 recorded / 0 visible");
+		expect(output).toContain("Reflections:  0 recorded / 0 superseded / 0 active / 0 visible");
 		expect(output).toContain("Next observation:");
 		expect(output).toContain("Next compaction:");
 		expect(output).not.toContain("Visible:");
@@ -85,14 +90,55 @@ describe("V3 /om:status", () => {
 		const output = await setup({ entries }).run();
 
 		expect(output).toContain("Observations: 2 recorded / 1 dropped / 1 active / 1 visible +1 -1");
-		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
-		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
-		expect(output).toContain("Active observation pool: ~7 / 20 target tokens (35%)");
+		expect(output).toContain("Reflections:  1 recorded / 0 superseded / 1 active / 0 visible +1");
+		expect(output).toContain("Visible observation pool: ~5 / 40 full-fold trigger tokens (13%)");
+		expect(output).toContain("Active observation pool: ~7 / 20 desired / 40 maintenance trigger tokens (18% of trigger)");
 		expect(output).not.toContain("Visible:");
 		expect(output).not.toContain("Drift:");
 		expect(output).not.toContain("full truth");
 		expect(output).not.toContain("v2-obs");
 		expect(output).not.toContain("observational-memory");
+	});
+
+	it("reports recorded, superseded, active, and visible reflection counts", async () => {
+		const originalA = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { tokenCount: 8 });
+		const originalB = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { tokenCount: 7 });
+		const replacement = reflection("111111111111", ["aaaaaaaaaaaa"], { tokenCount: 5 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-ref", { reflections: [originalA, originalB], coversUpToId: "raw-1" }),
+			reflectionsConsolidatedEntry("om-consolidated", {
+				entries: [{ replacement, supersededReflectionIds: [originalA.id, originalB.id] }],
+				coversUpToId: "raw-1",
+			}),
+		];
+
+		const output = await setup({ entries }).run();
+
+		expect(output).toContain("Reflections:  3 recorded / 2 superseded / 1 active / 0 visible +1");
+		expect(output).toContain("Active reflection pool:  ~5 / 20 target / 30 max tokens (17%)");
+	});
+
+	it("reports stale visible reflections removed by consolidation", async () => {
+		const originalA = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"], { tokenCount: 8 });
+		const originalB = reflection("ffffffffffff", ["aaaaaaaaaaaa"], { tokenCount: 7 });
+		const replacement = reflection("111111111111", ["aaaaaaaaaaaa"], { tokenCount: 5 });
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-ref", { reflections: [originalA, originalB], coversUpToId: "raw-1" }),
+			compactionEntry("cmp-visible", {
+				firstKeptEntryId: "raw-1",
+				details: memoryDetails({ reflections: [originalA, originalB] }),
+			}),
+			reflectionsConsolidatedEntry("om-consolidated", {
+				entries: [{ replacement, supersededReflectionIds: [originalA.id, originalB.id] }],
+				coversUpToId: "raw-1",
+			}),
+		];
+
+		const output = await setup({ entries }).run();
+
+		expect(output).toContain("Reflections:  3 recorded / 2 superseded / 1 active / 2 visible +1 -2");
 	});
 
 	it("shows separate progress clocks, visible pool, active observation pool, and reflection pool", async () => {
@@ -114,9 +160,10 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("/ 20 tokens");
 		expect(output).toContain("Next compaction:");
 		expect(output).toContain("/ 30 tokens");
-		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
-		expect(output).toContain("Active observation pool: ~5 / 20 target tokens (25%)");
-		expect(output).toContain("Reflection pool:         ~3 tokens");
+		expect(output).toContain("Visible observation pool: ~5 / 40 full-fold trigger tokens (13%)");
+		expect(output).toContain("Active observation pool: ~5 / 20 desired / 40 maintenance trigger tokens (13% of trigger)");
+		expect(output).toContain("Visible reflection pool: ~3 tokens");
+		expect(output).toContain("Active reflection pool:  ~3 / 20 target / 30 max tokens (10%)");
 		expect(output).not.toContain("Observation pool:");
 		expect(output).not.toContain("Full fold pool:");
 		expect(output).not.toContain("visible observation tokens");
@@ -131,7 +178,7 @@ describe("V3 /om:status", () => {
 
 		const output = await setup({ entries }).run();
 
-		expect(output).toContain("Active observation pool: ~25 / 20 target tokens (125%)");
+		expect(output).toContain("Active observation pool: ~25 / 20 desired / 40 maintenance trigger tokens (63% of trigger)");
 	});
 
 	it("shows passive mode, consolidation in flight, compaction in flight, and stage-specific last errors", async () => {
@@ -145,6 +192,7 @@ describe("V3 /om:status", () => {
 				compactHookInFlight: true,
 				lastObserverError: "observer failed",
 				lastReflectorError: "reflect failed",
+				lastConsolidatorError: "consolidate failed",
 				lastDropperError: "drop failed",
 			},
 		}).run();
@@ -157,6 +205,7 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Compaction hook: running");
 		expect(output).toContain("Observer: observer failed");
 		expect(output).toContain("Reflector: reflect failed");
+		expect(output).toContain("Consolidator: consolidate failed");
 		expect(output).toContain("Dropper: drop failed");
 	});
 

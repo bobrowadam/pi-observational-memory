@@ -3,7 +3,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Runtime } from "../runtime.js";
 import { buildCompactionProjection, renderSummary, type Entry } from "../session-ledger/index.js";
 
-const DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 20_000;
+const DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 10_000;
 
 function observationsPoolMaxTokens(runtime: Runtime): number {
 	const value = (runtime.config as { observationsPoolMaxTokens?: unknown }).observationsPoolMaxTokens;
