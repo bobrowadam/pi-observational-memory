@@ -6,6 +6,8 @@ import {
 	isSourceEntry,
 	latestCoverageIndex,
 	latestCoverageMarkerId,
+	latestObserverCoverage,
+	observerSafeCompactionBoundary,
 	rawTokensAfterIndex,
 	rawTokensSinceDropCoverage,
 	rawTokensSinceLastCompaction,
@@ -128,6 +130,36 @@ describe("session-ledger V3 progress helpers", () => {
 		expect(() => rawTokensSinceObservationCoverage(entries)).not.toThrow();
 		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
 		expect(latestCoverageIndex(entries, V3_REFLECTIONS_RECORDED)).toBe(-1);
+	});
+
+	it("clamps a compaction boundary to the first source entry the observer has not covered", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", { observations: [observation("aaaaaaaaaaaa")], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
+			textCustomMessage("raw-3", "cccc"),
+		];
+
+		expect(latestObserverCoverage(entries)).toEqual({ entryId: "raw-1", index: 0 });
+		expect(observerSafeCompactionBoundary(entries, "raw-3")).toEqual({
+			requestedFirstKeptEntryId: "raw-3",
+			firstKeptEntryId: "raw-2",
+			observerCoverageUpToId: "raw-1",
+			retainedBeyondRequestedCut: true,
+		});
+	});
+
+	it("does not let an observation marker covering ledger metadata authorize raw-history dropping", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-1", { observations: [observation("aaaaaaaaaaaa")], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
+			observationsRecordedEntry("om-2", { observations: [observation("bbbbbbbbbbbb")], coversUpToId: "om-1" }),
+			textCustomMessage("raw-3", "cccc"),
+		];
+
+		expect(latestObserverCoverage(entries)).toEqual({ entryId: "raw-1", index: 0 });
+		expect(observerSafeCompactionBoundary(entries, "raw-3").firstKeptEntryId).toBe("raw-2");
 	});
 
 	it("counts raw tokens since the latest Pi compaction without throwing on old memory details", () => {

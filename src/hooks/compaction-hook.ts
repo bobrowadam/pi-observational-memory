@@ -1,7 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 import type { Runtime } from "../runtime.js";
-import { buildCompactionProjection, renderSummary, type Entry } from "../session-ledger/index.js";
+import {
+	buildCompactionProjection,
+	isMemoryDetails,
+	observerSafeCompactionBoundary,
+	renderSummary,
+	type Entry,
+} from "../session-ledger/index.js";
 
 const DEFAULT_OBSERVATIONS_POOL_MAX_TOKENS = 10_000;
 
@@ -28,10 +34,14 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 		try {
 			runtime.ensureConfig(ctx.cwd);
 			const { preparation, branchEntries } = event;
-			const { firstKeptEntryId, tokensBefore } = preparation;
+			const { firstKeptEntryId: requestedFirstKeptEntryId, tokensBefore } = preparation;
+			const boundary = observerSafeCompactionBoundary(
+				branchEntries as Entry[],
+				requestedFirstKeptEntryId,
+			);
 			const projection = buildCompactionProjection(
 				branchEntries as Entry[],
-				firstKeptEntryId,
+				boundary.firstKeptEntryId,
 				{ observationsPoolMaxTokens: observationsPoolMaxTokens(runtime) },
 			);
 			const summary = renderSummary(projection.reflections, projection.observations);
@@ -39,13 +49,32 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			return {
 				compaction: {
 					summary,
-					firstKeptEntryId,
+					firstKeptEntryId: boundary.firstKeptEntryId,
 					tokensBefore,
-					details: projection.details,
+					details: {
+						...projection.details,
+						requestedFirstKeptEntryId: boundary.requestedFirstKeptEntryId,
+						observerCoverageUpToId: boundary.observerCoverageUpToId,
+						retainedBeyondRequestedCut: boundary.retainedBeyondRequestedCut,
+					},
 				},
 			};
 		} finally {
 			runtime.compactHookInFlight = false;
 		}
+	});
+
+	pi.on("session_compact", (event: any, ctx: any) => {
+		if (!event.fromExtension || !isMemoryDetails(event.compactionEntry?.details)) return;
+		const details = event.compactionEntry.details;
+		const actual = event.compactionEntry.firstKeptEntryId;
+		const requested = details.requestedFirstKeptEntryId;
+		if (!actual || !requested || !ctx.hasUI) return;
+		const coverage = details.observerCoverageUpToId ?? "none";
+		const retained = details.retainedBeyondRequestedCut === true;
+		ctx.ui.notify(
+			`Observational memory: compaction kept from ${actual} (configured cut: ${requested}; observer coverage: ${coverage})${retained ? "; retained unobserved history" : ""}`,
+			retained ? "warning" : "info",
+		);
 	});
 }

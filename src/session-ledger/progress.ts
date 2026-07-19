@@ -4,6 +4,7 @@ import {
 	OM_OBSERVATIONS_RECORDED,
 	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
+	isObservationsRecordedEntry,
 	type Entry,
 	type V3MemoryCustomType,
 } from "./types.js";
@@ -102,6 +103,69 @@ export function rawTokensSinceCoverage(entries: Entry[], customType: V3MemoryCus
 
 export function rawTokensSinceObservationCoverage(entries: Entry[]): number {
 	return rawTokensSinceCoverage(entries, OM_OBSERVATIONS_RECORDED);
+}
+
+export type ObserverCoverage = {
+	entryId?: string;
+	index: number;
+};
+
+/**
+ * Return the latest source entry known to have been processed by the observer.
+ * Unlike generic coverage markers, this deliberately rejects markers pointing
+ * at ledger metadata: only raw, model-visible source entries are safe to drop.
+ */
+export function latestObserverCoverage(entries: Entry[]): ObserverCoverage {
+	const indexes = entryIndexById(entries);
+	let latest: ObserverCoverage = { index: -1 };
+
+	for (const entry of entries) {
+		if (!isObservationsRecordedEntry(entry)) continue;
+		const index = indexes.get(entry.data.coversUpToId);
+		if (index === undefined || !isSourceEntry(entries[index])) continue;
+		if (index > latest.index) {
+			latest = { entryId: entry.data.coversUpToId, index };
+		}
+	}
+
+	return latest;
+}
+
+export type CompactionBoundary = {
+	requestedFirstKeptEntryId: string;
+	firstKeptEntryId: string;
+	observerCoverageUpToId?: string;
+	retainedBeyondRequestedCut: boolean;
+};
+
+/**
+ * Keep every source entry the observer has not yet processed, even when Pi's
+ * configured tail would otherwise discard it.
+ */
+export function observerSafeCompactionBoundary(
+	entries: Entry[],
+	requestedFirstKeptEntryId: string,
+): CompactionBoundary {
+	const requestedIndex = entryIndexForId(entries, requestedFirstKeptEntryId);
+	const observerCoverage = latestObserverCoverage(entries);
+	const boundary: CompactionBoundary = {
+		requestedFirstKeptEntryId,
+		firstKeptEntryId: requestedFirstKeptEntryId,
+		observerCoverageUpToId: observerCoverage.entryId,
+		retainedBeyondRequestedCut: false,
+	};
+	if (requestedIndex < 0) return boundary;
+
+	for (let index = Math.max(0, observerCoverage.index + 1); index < requestedIndex; index++) {
+		if (!isSourceEntry(entries[index])) continue;
+		return {
+			...boundary,
+			firstKeptEntryId: entries[index].id,
+			retainedBeyondRequestedCut: true,
+		};
+	}
+
+	return boundary;
 }
 
 export function rawTokensSinceReflectionCoverage(entries: Entry[]): number {

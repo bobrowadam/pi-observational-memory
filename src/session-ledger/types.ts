@@ -70,6 +70,12 @@ export type MemoryDetails = {
 	fullFold: boolean;
 	observations: Observation[];
 	reflections: Reflection[];
+	/** Pi's token-budget cut before observational-memory safety clamping. */
+	requestedFirstKeptEntryId?: string;
+	/** Latest raw source entry processed by the observer at compaction time. */
+	observerCoverageUpToId?: string;
+	/** Whether unprocessed raw history forced a longer retained tail. */
+	retainedBeyondRequestedCut?: boolean;
 };
 
 export type V3MemoryCustomType =
@@ -204,7 +210,10 @@ export function isMemoryDetails(value: unknown): value is MemoryDetails {
 		Array.isArray(value.observations) &&
 		value.observations.every(isObservation) &&
 		Array.isArray(value.reflections) &&
-		value.reflections.every(isReflection)
+		value.reflections.every(isReflection) &&
+		(value.requestedFirstKeptEntryId === undefined || isNonEmptyString(value.requestedFirstKeptEntryId)) &&
+		(value.observerCoverageUpToId === undefined || isNonEmptyString(value.observerCoverageUpToId)) &&
+		(value.retainedBeyondRequestedCut === undefined || typeof value.retainedBeyondRequestedCut === "boolean")
 	);
 }
 

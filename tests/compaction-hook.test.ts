@@ -16,11 +16,10 @@ import {
 } from "./fixtures/session.js";
 
 function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number; compactHookInFlight?: boolean }) {
-	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown> | unknown>();
 	const pi = {
-		on: vi.fn((eventName: string, cb: typeof handler) => {
-			expect(eventName).toBe("session_before_compact");
-			handler = cb;
+		on: vi.fn((eventName: string, cb: (event: unknown, ctx: unknown) => Promise<unknown> | unknown) => {
+			handlers.set(eventName, cb);
 		}),
 		appendEntry: vi.fn(),
 	};
@@ -36,19 +35,22 @@ function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number;
 		ensureConfig: vi.fn(),
 	};
 	registerCompactionHook(pi as any, runtime as any);
-	if (!handler) throw new Error("compaction handler was not registered");
+	const beforeCompact = handlers.get("session_before_compact");
+	const compact = handlers.get("session_compact");
+	if (!beforeCompact || !compact) throw new Error("compaction handlers were not registered");
 	const ctx = {
 		cwd: "/tmp/project",
 		hasUI: true,
 		ui: { notify: vi.fn() },
 		sessionManager: { getBranch: vi.fn(() => args.entries) },
 	};
-	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => handler!({
+	const run = (firstKeptEntryId = args.entries.at(-1)?.id ?? "missing") => beforeCompact({
 		preparation: { firstKeptEntryId, tokensBefore: 123 },
 		branchEntries: args.entries,
 		signal: undefined,
 	}, ctx);
-	return { pi, runtime, ctx, run };
+	const complete = (compactionEntry: unknown) => compact({ fromExtension: true, compactionEntry }, ctx);
+	return { pi, runtime, ctx, run, complete };
 }
 
 describe("V3 compaction hook", () => {
@@ -161,6 +163,31 @@ describe("V3 compaction hook", () => {
 			observations: [],
 			reflections: [],
 		});
+	});
+
+	it("retains unobserved source history and records the requested versus actual boundary", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"] });
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "raw-1" }),
+			textCustomMessage("raw-2", "bbbb"),
+			textCustomMessage("raw-3", "cccc"),
+		];
+		const { run, complete, ctx } = setup({ entries });
+
+		const result = await run("raw-3") as any;
+
+		expect(result.compaction.firstKeptEntryId).toBe("raw-2");
+		expect(result.compaction.details).toMatchObject({
+			requestedFirstKeptEntryId: "raw-3",
+			observerCoverageUpToId: "raw-1",
+			retainedBeyondRequestedCut: true,
+		});
+		await complete({ id: "cmp-1", firstKeptEntryId: "raw-2", details: result.compaction.details });
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			"Observational memory: compaction kept from raw-2 (configured cut: raw-3; observer coverage: raw-1); retained unobserved history",
+			"warning",
+		);
 	});
 
 	it("does not wait for worker promises or call model resolution", async () => {
