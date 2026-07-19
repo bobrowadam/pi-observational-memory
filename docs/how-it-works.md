@@ -67,6 +67,37 @@ The watermark is also used to decide whether a memory ledger entry belongs to a 
 
 ## Ledger data shapes
 
+### Worker usage
+
+Each completed observer, reflector, consolidator, or dropper model invocation appends an accounting entry after its agent loop settles, even when the worker produces no accepted memory records:
+
+```ts
+customType: "om.worker.usage"
+data: {
+  version: 1;
+  worker: "observer" | "reflector" | "consolidator" | "dropper";
+  provider?: string;
+  model?: string;
+  turns: number;
+  usage: {
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+    totalTokens: number;
+    cost: {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+      total: number;
+    };
+  };
+}
+```
+
+The entry aggregates all assistant turns from that worker invocation. Missing cost data is recorded as zero, and provider/model labels are omitted if the turns do not agree. These append-only audit entries do not alter Pi's native usage accounting, advance memory coverage, or participate in memory folds.
+
 ### Observations recorded
 
 ```ts

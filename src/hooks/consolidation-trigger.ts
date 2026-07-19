@@ -5,6 +5,7 @@ import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
+import { OM_WORKER_USAGE, type WorkerUsageRecorder } from "../agents/worker-usage.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
 import { type ResolveResult, type Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
@@ -60,6 +61,10 @@ function sourceEntriesAfter(entries: Entry[], index: number): Entry[] {
 
 function appendEntry(pi: ExtensionAPI, customType: string, data: unknown): void {
 	pi.appendEntry(customType, data);
+}
+
+function workerUsageRecorder(pi: ExtensionAPI): WorkerUsageRecorder {
+	return (data) => appendEntry(pi, OM_WORKER_USAGE, data);
 }
 
 function reflectionPoolFingerprint(reflections: readonly Reflection[]): string {
@@ -250,6 +255,7 @@ async function runObserverStage(
 		priorObservations,
 		chunk,
 		allowedSourceEntryIds: sourceEntryIds,
+		onUsage: workerUsageRecorder(pi),
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: runtime.config.model?.thinking ?? "low",
 	});
@@ -306,6 +312,7 @@ async function runReflectorStage(
 		reflections: folded.activeReflections,
 		historicalReflectionIds: folded.reflectionsById.keys(),
 		observations: folded.activeObservations,
+		onUsage: workerUsageRecorder(pi),
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: runtime.config.model?.thinking ?? "low",
 	});
@@ -357,6 +364,7 @@ async function runConsolidatorStage(
 		reflections: folded.activeReflections,
 		historicalReflectionIds: folded.reflectionsById.keys(),
 		targetTokens: runtime.config.reflectionsPoolTargetTokens,
+		onUsage: workerUsageRecorder(pi),
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: runtime.config.model?.thinking ?? "low",
 	});
@@ -439,6 +447,7 @@ async function runDropperStage(
 		reflections: folded.activeReflections,
 		observations: folded.activeObservations,
 		targetTokens: runtime.config.observationsPoolTargetTokens,
+		onUsage: workerUsageRecorder(pi),
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: runtime.config.model?.thinking ?? "low",
 	});

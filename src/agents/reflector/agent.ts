@@ -9,6 +9,7 @@ import { truncateRecordContent } from "../../serialize.js";
 import { REFLECTOR_SYSTEM } from "./prompts.js";
 import { estimateStringTokens } from "../../tokens.js";
 import { reflectionToSummaryLine, type Observation, type Reflection } from "../../session-ledger/index.js";
+import { recordWorkerUsage, type WorkerUsageRecorder } from "../worker-usage.js";
 import {
 	coverageTierForObservation,
 	reflectionCoverageMap,
@@ -26,6 +27,7 @@ interface RunReflectorArgs {
 	observations: Observation[];
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
+	onUsage?: WorkerUsageRecorder;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
 }
@@ -188,7 +190,8 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	for await (const _event of stream) {
 		// Tool execution collects records.
 	}
-	await stream.result();
+	const result = await stream.result();
+	recordWorkerUsage(args.onUsage, "reflector", result);
 	const acceptedReflections = Array.from(accumulated.values());
 	const afterCoverageById = reflectionCoverageMap(observations, [...reflections, ...acceptedReflections]);
 	debugLog("reflector.result", {

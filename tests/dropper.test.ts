@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	maxDropCountForPool,
@@ -8,13 +8,17 @@ import {
 	selectDropCandidates,
 } from "../src/agents/dropper/agent.js";
 import { observation, reflection } from "./fixtures/session.js";
+import { workerAssistantMessage } from "./fixtures/worker-usage.js";
 
-function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
+function fakeAgentLoop(
+	handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
+	result: any[] = [],
+): any {
 	return ((prompts: any[], context: any, config: any) => ({
 		async *[Symbol.asyncIterator]() {},
 		result: async () => {
 			await handler(prompts, context, config);
-			return {};
+			return result;
 		},
 	})) as any;
 }
@@ -202,6 +206,15 @@ describe("V3 dropper agent", () => {
 	it("returns undefined when no tool call drops observations", async () => {
 		const loop = fakeAgentLoop(() => {});
 		await expect(runDropper({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
+	});
+
+	it("records usage from the completed dropper result", async () => {
+		const onUsage = vi.fn();
+		const loop = fakeAgentLoop(() => {}, [workerAssistantMessage()]);
+
+		await runDropper({ ...baseArgs, agentLoop: loop, onUsage });
+
+		expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ worker: "dropper", turns: 1 }));
 	});
 
 	it("skips the model at or below the target", async () => {

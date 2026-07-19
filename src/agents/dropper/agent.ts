@@ -15,6 +15,7 @@ import {
 	observationToDropperLine,
 } from "./coverage.js";
 import { observationPoolMetrics } from "./pool.js";
+import { recordWorkerUsage, type WorkerUsageRecorder } from "../worker-usage.js";
 export {
 	maxDropCountForPool,
 	observationPoolFullness,
@@ -44,6 +45,7 @@ interface RunDropperArgs {
 	targetTokens: number;
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
+	onUsage?: WorkerUsageRecorder;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
 }
@@ -253,7 +255,8 @@ export async function runDropper(args: RunDropperArgs): Promise<string[] | undef
 	for await (const _event of stream) {
 		// Tool execution collects candidate ids.
 	}
-	await stream.result();
+	const result = await stream.result();
+	recordWorkerUsage(args.onUsage, "dropper", result);
 	const droppedIds = selectDropCandidates(proposedDropIds, observations, maxDropsAllowed, reflections);
 	const reason = droppedIds.length > 0
 		? "selected_nonempty"

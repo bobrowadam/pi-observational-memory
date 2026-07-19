@@ -12,6 +12,7 @@ vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.ru
 vi.mock("../src/agents/consolidator/agent.js", () => ({ runConsolidator: mockAgents.runConsolidator }));
 vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
 
+import { OM_WORKER_USAGE } from "../src/agents/worker-usage.js";
 import { hashId } from "../src/ids.js";
 import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
 import {
@@ -232,7 +233,25 @@ describe("V3 consolidation trigger", () => {
 
 	it("runs observer first and appends source-addressed observations", async () => {
 		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
-		mockAgents.runObserver.mockResolvedValueOnce([obs]);
+		const workerUsage = {
+			version: 1,
+			worker: "observer",
+			provider: "anthropic",
+			model: "memory",
+			turns: 1,
+			usage: {
+				input: 10,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 12,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		mockAgents.runObserver.mockImplementationOnce(async (args) => {
+			args.onUsage(workerUsage);
+			return [obs];
+		});
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999 });
 
@@ -245,7 +264,10 @@ describe("V3 consolidation trigger", () => {
 			maxTurns: 9,
 			thinkingLevel: "minimal",
 		}));
-		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
+		expect(pi.appendEntry.mock.calls).toEqual([
+			[OM_WORKER_USAGE, workerUsage],
+			[OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" }],
+		]);
 	});
 
 	it("uses existing observation coverage and retries larger ranges after no-output", async () => {

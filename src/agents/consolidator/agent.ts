@@ -8,6 +8,7 @@ import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { truncateRecordContent } from "../../serialize.js";
 import { type Reflection, type ReflectionConsolidation } from "../../session-ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
+import { recordWorkerUsage, type WorkerUsageRecorder } from "../worker-usage.js";
 import { reflectionTokenSum } from "./pool.js";
 import { CONSOLIDATOR_SYSTEM } from "./prompts.js";
 
@@ -20,6 +21,7 @@ interface RunConsolidatorArgs {
 	targetTokens: number;
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
+	onUsage?: WorkerUsageRecorder;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
 }
@@ -166,7 +168,8 @@ export async function runConsolidator(args: RunConsolidatorArgs): Promise<Reflec
 	for await (const _event of stream) {
 		// Tool execution collects validated consolidations.
 	}
-	await stream.result();
+	const result = await stream.result();
+	recordWorkerUsage(args.onUsage, "consolidator", result);
 	debugLog("consolidator.result", {
 		reason: accepted.length > 0 ? "accepted_nonempty" : toolCallCount === 0 ? "no_tool_call" : "all_filtered",
 		toolCallCount,

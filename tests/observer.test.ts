@@ -1,16 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { normalizeSourceEntryIds, OBSERVATION_TIMESTAMP_PATTERN, runObserver } from "../src/agents/observer/agent.js";
 import { estimateStringTokens } from "../src/tokens.js";
+import { workerAssistantMessage } from "./fixtures/worker-usage.js";
 
-function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
+function fakeAgentLoop(
+	handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
+	result: any[] = [],
+): any {
 	return ((prompts: any[], context: any, config: any) => ({
 		async *[Symbol.asyncIterator]() {
 			// No streaming events needed for these tests.
 		},
 		result: async () => {
 			await handler(prompts, context, config);
-			return {};
+			return result;
 		},
 	})) as any;
 }
@@ -105,6 +109,15 @@ describe("runObserver", () => {
 	it("returns undefined when no tool call records observations", async () => {
 		const loop = fakeAgentLoop(() => {});
 		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
+	});
+
+	it("records usage from the completed observer result", async () => {
+		const onUsage = vi.fn();
+		const loop = fakeAgentLoop(() => {}, [workerAssistantMessage()]);
+
+		await runObserver({ ...baseArgs, agentLoop: loop, onUsage });
+
+		expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ worker: "observer", turns: 1 }));
 	});
 
 	it("uses maxTurns as an observer turn cap", async () => {

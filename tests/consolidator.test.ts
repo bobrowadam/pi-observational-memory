@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	isStrictReflectionReduction,
@@ -8,13 +8,17 @@ import {
 import { hashId } from "../src/ids.js";
 import { estimateStringTokens } from "../src/tokens.js";
 import { reflection } from "./fixtures/session.js";
+import { workerAssistantMessage } from "./fixtures/worker-usage.js";
 
-function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
+function fakeAgentLoop(
+	handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
+	result: any[] = [],
+): any {
 	return ((prompts: any[], context: any, config: any) => ({
 		async *[Symbol.asyncIterator]() {},
 		result: async () => {
 			await handler(prompts, context, config);
-			return {};
+			return result;
 		},
 	})) as any;
 }
@@ -88,6 +92,15 @@ describe("reflection consolidator", () => {
 
 		expect(result).toHaveLength(1);
 		expect(result?.[0].supersededReflectionIds).toEqual([refA.id]);
+	});
+
+	it("records usage from the completed consolidator result", async () => {
+		const onUsage = vi.fn();
+		const loop = fakeAgentLoop(() => {}, [workerAssistantMessage()]);
+
+		await runConsolidator({ ...baseArgs, agentLoop: loop, onUsage });
+
+		expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ worker: "consolidator", turns: 1 }));
 	});
 
 	it("requires meaningful savings for one-for-one rewrites", () => {

@@ -8,6 +8,7 @@ import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../session-ledger/index.js";
 import { estimateStringTokens } from "../../tokens.js";
+import { recordWorkerUsage, type WorkerUsageRecorder } from "../worker-usage.js";
 
 interface RunObserverArgs {
 	model: Model<any>;
@@ -19,6 +20,7 @@ interface RunObserverArgs {
 	allowedSourceEntryIds: string[];
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
+	onUsage?: WorkerUsageRecorder;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
 }
@@ -190,7 +192,8 @@ ${conversation}`;
 	for await (const _event of stream) {
 		// Drain events; the tool's execute already collects records.
 	}
-	await stream.result();
+	const result = await stream.result();
+	recordWorkerUsage(args.onUsage, "observer", result);
 
 	if (accumulated.size === 0) return undefined;
 	return Array.from(accumulated.values());

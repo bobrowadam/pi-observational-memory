@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
 	normalizeSupportingObservationIds,
@@ -9,13 +9,17 @@ import {
 import { hashId } from "../src/ids.js";
 import { estimateStringTokens } from "../src/tokens.js";
 import { observation, reflection } from "./fixtures/session.js";
+import { workerAssistantMessage } from "./fixtures/worker-usage.js";
 
-function fakeAgentLoop(handler: (prompts: any[], context: any, config: any) => Promise<void> | void): any {
+function fakeAgentLoop(
+	handler: (prompts: any[], context: any, config: any) => Promise<void> | void,
+	result: any[] = [],
+): any {
 	return ((prompts: any[], context: any, config: any) => ({
 		async *[Symbol.asyncIterator]() {},
 		result: async () => {
 			await handler(prompts, context, config);
-			return {};
+			return result;
 		},
 	})) as any;
 }
@@ -231,5 +235,14 @@ describe("V3 reflector agent", () => {
 	it("returns undefined when no tool call records reflections", async () => {
 		const loop = fakeAgentLoop(() => {});
 		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
+	});
+
+	it("records usage from the completed reflector result", async () => {
+		const onUsage = vi.fn();
+		const loop = fakeAgentLoop(() => {}, [workerAssistantMessage()]);
+
+		await runReflector({ ...baseArgs, agentLoop: loop, onUsage });
+
+		expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ worker: "reflector", turns: 1 }));
 	});
 });
