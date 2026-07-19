@@ -289,14 +289,31 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [newObs], coversUpToId: "raw-3" });
 	});
 
-	it("observer no-output appends nothing and does not fake observation coverage", async () => {
+	it("observer no-output records usage without faking observation coverage", async () => {
+		const workerUsage = {
+			version: 1,
+			worker: "observer",
+			turns: 1,
+			usage: {
+				input: 10,
+				output: 2,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 12,
+				cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+			},
+		};
+		mockAgents.runObserver.mockImplementationOnce(async (args) => {
+			args.onUsage(workerUsage);
+			return undefined;
+		});
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
 		const { fire, runLaunchedWork, pi } = setup({ entries });
 
 		fire();
 		await runLaunchedWork();
 
-		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(pi.appendEntry.mock.calls).toEqual([[OM_WORKER_USAGE, workerUsage]]);
 		expect(mockAgents.runReflector).not.toHaveBeenCalled();
 		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 	});

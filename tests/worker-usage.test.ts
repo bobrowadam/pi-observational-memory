@@ -62,6 +62,20 @@ describe("worker usage accounting", () => {
 		});
 	});
 
+	it("falls back to positive token and cost components when reported totals are zero", () => {
+		const result = aggregateWorkerUsage("observer", [assistant({
+			input: 7,
+			output: 3,
+			cacheRead: 2,
+			cacheWrite: 1,
+			totalTokens: 0,
+			cost: { input: 0.07, output: 0.06, cacheRead: 0.01, cacheWrite: 0.02, total: 0 },
+		})]);
+
+		expect(result?.usage.totalTokens).toBe(13);
+		expect(result?.usage.cost.total).toBeCloseTo(0.16);
+	});
+
 	it("records zero cost when provider cost data is absent", () => {
 		const message = assistant({
 			input: 7,
@@ -113,6 +127,21 @@ describe("worker usage accounting", () => {
 				cost: { input: 0, output: 0, cacheRead: 0.02, cacheWrite: 0, total: 0.02 },
 			},
 		});
+	});
+
+	it("records usage from an assistant error response", () => {
+		const message = assistant({
+			input: 5,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 6,
+			cost: { input: 0.05, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.07 },
+		});
+		message.stopReason = "error";
+		message.errorMessage = "provider failed";
+
+		expect(aggregateWorkerUsage("observer", [message])?.usage.cost.total).toBe(0.07);
 	});
 
 	it("does not call the recorder when no assistant usage is present", () => {

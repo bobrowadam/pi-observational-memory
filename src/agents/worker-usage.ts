@@ -42,6 +42,16 @@ function usageValue(value: number | undefined): number {
 	return nonNegativeFinite(value) ?? 0;
 }
 
+function reportedTotalOrComponents(
+	reported: number | undefined,
+	components: number,
+): number {
+	const normalized = nonNegativeFinite(reported);
+	return normalized !== undefined && (normalized > 0 || components === 0)
+		? normalized
+		: components;
+}
+
 function sharedLabel(
 	messages: readonly AssistantMessage[],
 	select: (message: AssistantMessage) => string | undefined,
@@ -79,8 +89,8 @@ export function aggregateWorkerUsage(
 		output += messageOutput;
 		cacheRead += messageCacheRead;
 		cacheWrite += messageCacheWrite;
-		totalTokens += nonNegativeFinite(message.usage?.totalTokens)
-			?? messageInput + messageOutput + messageCacheRead + messageCacheWrite;
+		const messageTokenComponents = messageInput + messageOutput + messageCacheRead + messageCacheWrite;
+		totalTokens += reportedTotalOrComponents(message.usage?.totalTokens, messageTokenComponents);
 
 		const messageCostInput = usageValue(message.usage?.cost?.input);
 		const messageCostOutput = usageValue(message.usage?.cost?.output);
@@ -90,8 +100,8 @@ export function aggregateWorkerUsage(
 		costOutput += messageCostOutput;
 		costCacheRead += messageCostCacheRead;
 		costCacheWrite += messageCostCacheWrite;
-		costTotal += nonNegativeFinite(message.usage?.cost?.total)
-			?? messageCostInput + messageCostOutput + messageCostCacheRead + messageCostCacheWrite;
+		const messageCostComponents = messageCostInput + messageCostOutput + messageCostCacheRead + messageCostCacheWrite;
+		costTotal += reportedTotalOrComponents(message.usage?.cost?.total, messageCostComponents);
 	}
 
 	const provider = sharedLabel(assistants, (message) => message.provider);
