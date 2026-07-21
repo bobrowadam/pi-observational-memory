@@ -1,4 +1,5 @@
 import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
+import { startWorkerAgentLoop } from "../agent-loop.js";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
@@ -186,7 +187,7 @@ export async function runReflector(args: RunReflectorArgs): Promise<Reflection[]
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(prompts, context, config, signal);
+	const stream = startWorkerAgentLoop(loop, prompts, context, config, signal);
 	for await (const _event of stream) {
 		// Tool execution collects records.
 	}

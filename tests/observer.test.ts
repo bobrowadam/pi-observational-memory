@@ -120,6 +120,21 @@ describe("runObserver", () => {
 		expect(onUsage).toHaveBeenCalledWith(expect.objectContaining({ worker: "observer", turns: 1 }));
 	});
 
+	it("passes the stream function required by Pi agent loops", async () => {
+		let receivedStreamFunction: unknown;
+		const loop = ((_prompts: any[], _context: any, _config: any, _signal: any, streamFunction: unknown) => {
+			receivedStreamFunction = streamFunction;
+			return {
+				async *[Symbol.asyncIterator]() {},
+				result: async () => [],
+			};
+		}) as any;
+
+		await runObserver({ ...baseArgs, agentLoop: loop });
+
+		expect(receivedStreamFunction).toBeTypeOf("function");
+	});
+
 	it("uses maxTurns as an observer turn cap", async () => {
 		let shouldStopAfterTurn: any;
 		const loop = fakeAgentLoop((_prompts, _context, config) => {
