@@ -4,7 +4,9 @@ import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { type ResolveResult, type Runtime } from "../runtime.js";
+import { resolveObserverChunkMaxTokens } from "../config.js";
+import type { ResolveResult, Runtime } from "../runtime.js";
+import { estimateEntryTokens } from "../tokens.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
@@ -192,8 +194,39 @@ async function runObserverStage(
 	const tokens = rawTokensSinceObservationCoverage(entries);
 	if (tokens < runtime.config.observeAfterTokens) return "continue";
 
+	// Resolve the model before building the chunk: the default chunk cap
+	// derives from the resolved model's context window.
+	const resolved = await resolveModel("observer");
+	if (!resolved) return "abort";
+
 	const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-	const chunkEntries = sourceEntriesAfter(entries, lastCoverageIdx);
+	const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
+
+	// Cap the chunk so a backlog that outgrew the model's context window (e.g.
+	// after repeated observer failures, or when the extension joins a long
+	// session late) cannot make every subsequent call fail. Oldest entries
+	// first; coverage advances incrementally across runs until the backlog is
+	// drained. At least one entry is always included so a single oversized
+	// entry cannot stall coverage forever.
+	const contextWindow = (resolved.model as { contextWindow?: number }).contextWindow;
+	const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
+	const chunkEntries: Entry[] = [];
+	let chunkTokens = 0;
+	for (const entry of backlogEntries) {
+		const entryTokens = estimateEntryTokens(entry);
+		if (chunkEntries.length > 0 && chunkTokens + entryTokens > maxChunkTokens) break;
+		chunkEntries.push(entry);
+		chunkTokens += entryTokens;
+	}
+	if (chunkEntries.length < backlogEntries.length) {
+		debugLog("observer.chunk_capped", {
+			maxChunkTokens,
+			backlogEntries: backlogEntries.length,
+			backlogTokens: tokens,
+			chunkEntries: chunkEntries.length,
+			chunkTokens,
+		});
+	}
 	const coversUpToId = chunkEntries.at(-1)?.id;
 	if (!coversUpToId) return "continue";
 
@@ -205,20 +238,18 @@ async function runObserverStage(
 	const priorObservations = memory.observations.map(observationToSummaryLine);
 
 	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-		`Observational memory: observer running on ~${tokens.toLocaleString()}-token chunk`,
+		`Observational memory: observer running on ~${chunkTokens.toLocaleString()}-token chunk`,
 		"info",
 	);
 	debugLog("observer.start", {
 		tokens,
+		chunkTokens,
 		coversUpToId,
 		sourceEntryIds,
 		sourceEntryCount: sourceEntryIds.length,
 		priorReflections: priorReflections.length,
 		priorObservations: priorObservations.length,
 	});
-
-	const resolved = await resolveModel("observer");
-	if (!resolved) return "abort";
 
 	const observations = await runObserver({
 		model: resolved.model as any,
