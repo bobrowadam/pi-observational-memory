@@ -56,7 +56,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | --- | ---: | ---: | --- |
 | `observeAfterTokens` | positive integer | `10000` | Raw/source token threshold for observer runs. |
 | `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector runs; successful reflection creates dropper maintenance opportunities. |
-| `observerChunkMaxTokens` | positive integer | derived | Maximum estimated tokens sent to one observer run. Unset: 20% of the resolved memory model's context window, or `60000` when unknown. |
+| `observerChunkMaxTokens` | positive integer | derived; minimum `256` | Maximum estimated tokens sent to one observer run. Unset: 20% of the resolved memory model's context window, or `60000` when unknown. |
 | `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive auto-compaction. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
@@ -85,9 +85,9 @@ Lower values create smaller chunks and more frequent model calls. Higher values 
 
 Default: derived as 20% of the resolved memory model's context window, or `60000` when that window is unavailable.
 
-This caps the source-addressed text sent to one observer run. Complete source entries are added oldest-first while they fit; remaining entries stay eligible for later runs. If the oldest entry alone exceeds the budget, the observer receives a clearly marked head/tail excerpt instead of an over-context request. The original session entry is not modified, and observations still cite its original source id so `recall` can resolve the full evidence.
+This caps the source-addressed text sent to one observer run. Complete source entries are added oldest-first while they fit; remaining entries stay eligible for later runs. If the oldest entry alone exceeds the budget, the observer receives a clearly marked head/tail excerpt instead of an over-context request. The original session entry is not modified, and observations still cite its original source id so the source remains traceable in the session ledger.
 
-Set an explicit value when a provider exposes a context window that differs from Pi's model metadata. Keep room for the observer system prompt, prior observations/reflections, tool schemas, and output; setting this equal to the full model window will usually fail.
+Set an explicit value when a provider exposes a context window that differs from Pi's model metadata. Values below `256` are clamped to `256` so a chunk can always carry a complete source label, omission marker, and useful context. Keep room for the observer system prompt, prior observations/reflections, tool schemas, and output; setting this equal to the full model window will usually fail.
 
 ## `reflectAfterTokens`
 

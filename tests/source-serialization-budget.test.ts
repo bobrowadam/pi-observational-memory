@@ -91,7 +91,7 @@ describe("source-addressed serialization budget", () => {
 			"middle omitted: source exceeds observer input budget",
 		);
 		expect(result.text).toContain(
-			"full source remains available through recall",
+			"original source remains in the session ledger",
 		);
 		expect(result.text).not.toContain("raw-next");
 
