@@ -6,7 +6,6 @@ import { runReflector } from "../agents/reflector/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
 import { resolveObserverChunkMaxTokens } from "../config.js";
 import type { ResolveResult, Runtime } from "../runtime.js";
-import { estimateEntryTokens } from "../tokens.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
@@ -202,36 +201,32 @@ async function runObserverStage(
 	const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
 	const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
 
-	// Cap the chunk so a backlog that outgrew the model's context window (e.g.
-	// after repeated observer failures, or when the extension joins a long
-	// session late) cannot make every subsequent call fail. Oldest entries
-	// first; coverage advances incrementally across runs until the backlog is
-	// drained. At least one entry is always included so a single oversized
-	// entry cannot stall coverage forever.
+	// Budget the text that is actually sent to the observer, including source
+	// labels and rendered message content. Complete entries are kept intact.
+	// Only a first entry that cannot fit by itself is represented by a clearly
+	// marked head/tail excerpt; the original ledger entry remains untouched.
 	const contextWindow = (resolved.model as { contextWindow?: number }).contextWindow;
 	const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
-	const chunkEntries: Entry[] = [];
-	let chunkTokens = 0;
-	for (const entry of backlogEntries) {
-		const entryTokens = estimateEntryTokens(entry);
-		if (chunkEntries.length > 0 && chunkTokens + entryTokens > maxChunkTokens) break;
-		chunkEntries.push(entry);
-		chunkTokens += entryTokens;
-	}
-	if (chunkEntries.length < backlogEntries.length) {
+	const {
+		text: chunk,
+		sourceEntryIds,
+		estimatedTokens: chunkTokens,
+		truncatedSourceEntryIds,
+	} = serializeSourceAddressedBranchEntries(backlogEntries, { maxTokens: maxChunkTokens });
+	if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
+	const coversUpToId = sourceEntryIds.at(-1);
+	if (!coversUpToId) return "continue";
+
+	if (sourceEntryIds.length < backlogEntries.length || truncatedSourceEntryIds.length > 0) {
 		debugLog("observer.chunk_capped", {
 			maxChunkTokens,
 			backlogEntries: backlogEntries.length,
 			backlogTokens: tokens,
-			chunkEntries: chunkEntries.length,
+			chunkEntries: sourceEntryIds.length,
 			chunkTokens,
+			truncatedSourceEntryIds,
 		});
 	}
-	const coversUpToId = chunkEntries.at(-1)?.id;
-	if (!coversUpToId) return "continue";
-
-	const { text: chunk, sourceEntryIds } = serializeSourceAddressedBranchEntries(chunkEntries);
-	if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
 
 	const memory = fullProjection(entries);
 	const priorReflections = memory.reflections.map(reflectionToSummaryLine);

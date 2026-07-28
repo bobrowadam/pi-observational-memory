@@ -256,7 +256,7 @@ describe("V3 consolidation trigger", () => {
 		await runLaunchedWork();
 
 		expect(ctx.ui.notify.mock.calls).toEqual([
-			["Observational memory: observer running on ~2-token chunk", "info"],
+			[expect.stringMatching(/^Observational memory: observer running on ~\d+-token chunk$/), "info"],
 			["Observational memory: 1 observation recorded", "info"],
 			["Observational memory: reflector running (~2 tokens)", "info"],
 			["Observational memory: dropper running after reflection — active observation pool ~10 / 5 target tokens (200%)", "info"],
@@ -546,11 +546,11 @@ describe("observer chunk cap", () => {
 		const second = observation("222222222222", { sourceEntryIds: ["raw-2"], tokenCount: 4 });
 		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]);
 		const entries = [
-			textCustomMessage("raw-1", "a".repeat(40)), // ~10 estimated tokens each
-			textCustomMessage("raw-2", "b".repeat(40)),
-			textCustomMessage("raw-3", "c".repeat(40)),
+			textCustomMessage("raw-1", "a".repeat(800)),
+			textCustomMessage("raw-2", "b".repeat(800)),
+			textCustomMessage("raw-3", "c".repeat(800)),
 		];
-		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, observerChunkMaxTokens: 12, reflectAfterTokens: 999 });
+		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, observerChunkMaxTokens: 256, reflectAfterTokens: 999 });
 
 		fire();
 		await runLaunchedWork();
@@ -568,32 +568,61 @@ describe("observer chunk cap", () => {
 		expect(pi.appendEntry).toHaveBeenNthCalledWith(2, OM_OBSERVATIONS_RECORDED, { observations: [second], coversUpToId: "raw-2" });
 	});
 
-	it("always includes at least one entry even when it alone exceeds the cap", async () => {
-		const obs = observation("333333333333", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
-		mockAgents.runObserver.mockResolvedValueOnce([obs]);
-		const entries = [
-			textCustomMessage("raw-1", "x".repeat(400)), // ~100 estimated tokens, far over the 12-token cap
-			textCustomMessage("raw-2", "y".repeat(40)),
+	it("bounds one oversized tool result, preserves provenance, and continues on the next run", async () => {
+		const first = observation("333333333333", { sourceEntryIds: ["raw-huge"], tokenCount: 4 });
+		const second = observation("555555555555", { sourceEntryIds: ["raw-next"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce([first]).mockResolvedValueOnce([second]);
+		const hugeText = `HEAD:${"m".repeat(2_000)}:TAIL`;
+		const entries: TestEntry[] = [
+			{
+				type: "message",
+				id: "raw-huge",
+				parentId: null,
+				timestamp: "2026-05-02T10:00:00.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "tool-1",
+					toolName: "bash",
+					content: [{ type: "text", text: hugeText }],
+					isError: false,
+					timestamp: Date.parse("2026-05-02T10:00:00.000Z"),
+				},
+			},
+			textCustomMessage("raw-next", "later"),
 		];
-		const { fire, runLaunchedWork, pi } = setup({ entries, observerChunkMaxTokens: 12, reflectAfterTokens: 999 });
+		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, observerChunkMaxTokens: 100, reflectAfterTokens: 999 });
 
 		fire();
 		await runLaunchedWork();
 
-		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({ allowedSourceEntryIds: ["raw-1"] }));
-		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
+		const firstCall = mockAgents.runObserver.mock.calls[0][0];
+		expect(firstCall.allowedSourceEntryIds).toEqual(["raw-huge"]);
+		expect(firstCall.chunk).toContain("HEAD:");
+		expect(firstCall.chunk).toContain(":TAIL");
+		expect(firstCall.chunk).toContain("middle omitted: source exceeds observer input budget");
+		expect(firstCall.chunk).not.toContain("raw-next");
+		expect(pi.appendEntry).toHaveBeenNthCalledWith(1, OM_OBSERVATIONS_RECORDED, { observations: [first], coversUpToId: "raw-huge" });
+
+		// The source id still points at the full ledger entry; the next run starts
+		// after it instead of retrying the oversized input forever.
+		runtime.consolidationInFlight = false;
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenNthCalledWith(2, expect.objectContaining({ allowedSourceEntryIds: ["raw-next"] }));
+		expect(pi.appendEntry).toHaveBeenNthCalledWith(2, OM_OBSERVATIONS_RECORDED, { observations: [second], coversUpToId: "raw-next" });
 	});
 
 	it("derives the cap from the resolved model's context window when not configured", async () => {
 		const obs = observation("444444444444", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
 		mockAgents.runObserver.mockResolvedValueOnce([obs]);
 		const entries = [
-			textCustomMessage("raw-1", "a".repeat(40)),
-			textCustomMessage("raw-2", "b".repeat(40)),
+			textCustomMessage("raw-1", "a".repeat(800)),
+			textCustomMessage("raw-2", "b".repeat(800)),
 		];
 		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999 });
-		// contextWindow 60 -> cap = floor(60 * 0.2) = 12, so only raw-1 fits.
-		runtime.resolveModel.mockResolvedValue({ ok: true, model: { reasoning: true, contextWindow: 60 }, apiKey: "key", headers: { h: "v" } } as any);
+		// contextWindow 1,280 -> cap = floor(1,280 * 0.2) = 256, so only raw-1 fits.
+		runtime.resolveModel.mockResolvedValue({ ok: true, model: { reasoning: true, contextWindow: 1_280 }, apiKey: "key", headers: { h: "v" } } as any);
 
 		fire();
 		await runLaunchedWork();

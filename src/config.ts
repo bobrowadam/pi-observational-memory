@@ -89,6 +89,9 @@ export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "min
 /** Observer chunk cap used when no config is set and the model's context window is unknown. */
 export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 60_000;
 
+/** Smallest useful observer chunk: enough for labels, omission markers, and source context. */
+export const OBSERVER_CHUNK_MIN_TOKENS = 256;
+
 /**
  * Fraction of the memory model's context window used for the derived observer
  * chunk cap. Chunk sizes are estimated at ~4 chars/token, which can undercount
@@ -114,10 +117,13 @@ export const OBSERVER_CHUNK_CONTEXT_RATIO = 0.2;
  */
 export function resolveObserverChunkMaxTokens(config: Config, contextWindow: number | undefined): number {
 	if (config.observerChunkMaxTokens !== undefined && config.observerChunkMaxTokens > 0) {
-		return config.observerChunkMaxTokens;
+		return Math.max(OBSERVER_CHUNK_MIN_TOKENS, config.observerChunkMaxTokens);
 	}
 	if (typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0) {
-		return Math.max(1, Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO));
+		return Math.max(
+			OBSERVER_CHUNK_MIN_TOKENS,
+			Math.floor(contextWindow * OBSERVER_CHUNK_CONTEXT_RATIO),
+		);
 	}
 	return OBSERVER_CHUNK_FALLBACK_MAX_TOKENS;
 }
