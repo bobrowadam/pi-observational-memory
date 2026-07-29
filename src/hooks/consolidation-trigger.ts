@@ -4,9 +4,9 @@ import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { ObserverStreamError, runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { type ResolveResult, type Runtime } from "../runtime.js";
+import { resolveObserverChunkMaxTokens } from "../config.js";
+import type { ResolveResult, Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
-import { estimateEntryTokens } from "../tokens.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
@@ -45,22 +45,6 @@ type ConsolidationCtx = {
 };
 
 type StageOutcome = "continue" | "abort";
-
-// ponytail: hardcoded cap, make it a config knob if operators ever need to tune it.
-// Conservative enough that even a heavy chars/4 undercount stays far below real context windows (#32).
-const OBSERVER_CHUNK_MAX_TOKENS = 60_000;
-
-/** Oldest-first prefix of `entries` within `maxTokens`; always keeps the oldest entry so one oversized entry cannot stall coverage. */
-function capChunkOldestFirst(entries: Entry[], maxTokens: number): Entry[] {
-	const capped: Entry[] = [];
-	let total = 0;
-	for (const entry of entries) {
-		if (capped.length > 0 && total + estimateEntryTokens(entry) > maxTokens) break;
-		capped.push(entry);
-		total += estimateEntryTokens(entry);
-	}
-	return capped;
-}
 
 type ReflectorStageResult = {
 	outcome: StageOutcome;
@@ -232,26 +216,41 @@ async function runObserverStage(
 		}
 	}
 
+	// Resolve the model before building the chunk: the default chunk cap
+	// derives from the resolved model's context window.
+	const resolved = await resolveModel("observer");
+	if (!resolved) return "abort";
+
 	const lastCoverageIdx = latestCoverageIndex(entries, OM_OBSERVATIONS_RECORDED);
-	const uncoveredEntries = sourceEntriesAfter(entries, lastCoverageIdx);
-	// Cap the chunk (oldest first) so an oversized uncovered span drains in
-	// slices instead of failing permanently once it exceeds the context window (#32).
-	const chunkEntries = capChunkOldestFirst(uncoveredEntries, OBSERVER_CHUNK_MAX_TOKENS);
-	if (chunkEntries.length < uncoveredEntries.length) {
-		debugLog("observer.chunk_capped", {
-			uncoveredEntries: uncoveredEntries.length,
-			chunkEntries: chunkEntries.length,
-			uncoveredTokens: tokens,
-			maxChunkTokens: OBSERVER_CHUNK_MAX_TOKENS,
-		});
-	}
-	const coversUpToId = chunkEntries.at(-1)?.id;
+	const backlogEntries = sourceEntriesAfter(entries, lastCoverageIdx);
+
+	// Budget the text that is actually sent to the observer, including source
+	// labels and rendered message content. Complete entries are kept intact.
+	// Only a first entry that cannot fit by itself is represented by a clearly
+	// marked head/tail excerpt; the original ledger entry remains untouched.
+	const contextWindow = (resolved.model as { contextWindow?: number }).contextWindow;
+	const maxChunkTokens = resolveObserverChunkMaxTokens(runtime.config, contextWindow);
+	const {
+		text: chunk,
+		sourceEntryIds,
+		estimatedTokens: chunkTokens,
+		truncatedSourceEntryIds,
+	} = serializeSourceAddressedBranchEntries(backlogEntries, { maxTokens: maxChunkTokens });
+	if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
+	const coversUpToId = sourceEntryIds.at(-1);
 	if (!coversUpToId) return "continue";
 
-	const { text: chunk, sourceEntryIds } = serializeSourceAddressedBranchEntries(chunkEntries);
-	if (!chunk.trim() || sourceEntryIds.length === 0) return "continue";
+	if (sourceEntryIds.length < backlogEntries.length || truncatedSourceEntryIds.length > 0) {
+		debugLog("observer.chunk_capped", {
+			maxChunkTokens,
+			backlogEntries: backlogEntries.length,
+			backlogTokens: tokens,
+			chunkEntries: sourceEntryIds.length,
+			chunkTokens,
+			truncatedSourceEntryIds,
+		});
+	}
 
-	const chunkTokens = chunkEntries.reduce((sum, entry) => sum + estimateEntryTokens(entry), 0);
 	const memory = fullProjection(entries);
 	const priorReflections = memory.reflections.map(reflectionToSummaryLine);
 	const priorObservations = memory.observations.map(observationToSummaryLine);
@@ -261,16 +260,14 @@ async function runObserverStage(
 		"info",
 	);
 	debugLog("observer.start", {
-		tokens: chunkTokens,
+		tokens,
+		chunkTokens,
 		coversUpToId,
 		sourceEntryIds,
 		sourceEntryCount: sourceEntryIds.length,
 		priorReflections: priorReflections.length,
 		priorObservations: priorObservations.length,
 	});
-
-	const resolved = await resolveModel("observer");
-	if (!resolved) return "abort";
 
 	let observations: Observation[] | undefined;
 	try {
@@ -288,9 +285,7 @@ async function runObserverStage(
 	} catch (error) {
 		if (error instanceof ObserverStreamError) {
 			// API/stream failure is not a clean empty (#32): surface it as a real
-			// failure instead of the "no observations" path. Coverage stays put;
-			// the chunk cap keeps the next retry viable.
-			debugLog("observer.stream_error", { coversUpToId, stopReason: error.stopReason, errorMessage: error.message });
+			// failure instead of the "no observations" path. Coverage stays put.
 			runtime.recordConsolidationStageError(ctx, "observer", error);
 			return "abort";
 		}
