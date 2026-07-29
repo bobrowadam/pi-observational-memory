@@ -269,6 +269,7 @@ on the `Next compaction` line regardless of mode.
 | Setting                     | Default       | Meaning                                                                                           |
 | --------------------------- | ------------- | ------------------------------------------------------------------------------------------------- |
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
+| `observerChunkMaxTokens`    | derived       | Max estimated tokens serialized into one observer chunk (minimum `256`). Unset: `floor(contextWindow * 0.2)` of the resolved memory model, or `60000` when the window is unknown. Larger backlogs drain oldest-first; a single over-budget source is sent as a marked head/tail excerpt while the original source remains in the session ledger. |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
 | `compactAfterTokens`        | `81000`       | Raw/source token threshold for proactive auto-compaction (used directly in `"calibrated"` mode, and as the fallback in `"ratio"` mode). |
 | `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly (default, backwards-compatible). `"ratio"` scales the threshold by the active model's `contextWindow`. |

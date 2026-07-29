@@ -4,6 +4,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { hashId } from "../../ids.js";
+import { logAgentStreamError } from "../stream-errors.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
@@ -206,6 +207,7 @@ ${conversation}`;
 	let streamError: { stopReason: string; errorMessage?: string } | undefined;
 	for await (const event of stream) {
 		// Drain events; the tool's execute already collects records.
+		logAgentStreamError("observer", event);
 		// Watch for a terminal API/stream failure so it is not conflated with
 		// a deliberate empty result.
 		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
