@@ -31,6 +31,7 @@ The extension loads config once for its runtime. After changing settings, restar
   "observational-memory": {
     "observeAfterTokens": 10000,
     "reflectAfterTokens": 20000,
+    "observerChunkMaxTokens": 60000,
     "compactAfterTokens": 81000,
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
@@ -52,9 +53,10 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 ## Settings reference
 
 | Setting | Type | Default | What it controls |
-|---|---:|---:|---|
+| --- | ---: | ---: | --- |
 | `observeAfterTokens` | positive integer | `10000` | Raw/source token threshold for observer runs. |
 | `reflectAfterTokens` | positive integer | `20000` | Raw/source token threshold for reflector runs; successful reflection creates dropper maintenance opportunities. |
+| `observerChunkMaxTokens` | positive integer | derived; minimum `256` | Maximum estimated tokens sent to one observer run. Unset: 20% of the resolved memory model's context window, or `60000` when unknown. |
 | `compactAfterTokens` | positive integer | `81000` | Raw/source token threshold for proactive auto-compaction. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
@@ -78,6 +80,14 @@ Default: `10000`.
 The observer runs from Pi's `turn_end` hook. It counts raw/source tokens after the latest `om.observations.recorded.data.coversUpToId` marker. When the count reaches `observeAfterTokens`, the observer receives source entries after that marker and may append a non-empty `om.observations.recorded` ledger entry.
 
 Lower values create smaller chunks and more frequent model calls. Higher values reduce model-call frequency but let unobserved raw conversation accumulate longer. If the observer emits no observations, no ledger entry is written and the same range remains eligible for a later observer run.
+
+## `observerChunkMaxTokens`
+
+Default: derived as 20% of the resolved memory model's context window, or `60000` when that window is unavailable.
+
+This caps the source-addressed text sent to one observer run. Complete source entries are added oldest-first while they fit; remaining entries stay eligible for later runs. If the oldest entry alone exceeds the budget, the observer receives a clearly marked head/tail excerpt instead of an over-context request. The original session entry is not modified, and observations still cite its original source id so the source remains traceable in the session ledger.
+
+Set an explicit value when a provider exposes a context window that differs from Pi's model metadata. Values below `256` are clamped to `256` so a chunk can always carry a complete source label, omission marker, and useful context. Keep room for the observer system prompt, prior observations/reflections, tool schemas, and output; setting this equal to the full model window will usually fail.
 
 ## `reflectAfterTokens`
 
@@ -208,7 +218,7 @@ Debug-log write failures do not change memory behavior.
 V3 is not backwards compatible with V2 settings. Old keys are silently ignored and do not act as aliases.
 
 | V2 setting | V3 setting | Migration note |
-|---|---|---|
+| --- | --- | --- |
 | `observationThresholdTokens` | `observeAfterTokens` | Rename. Same rough observer-cadence role. |
 | `compactionThresholdTokens` | `compactAfterTokens` | Rename. Same rough proactive-compaction role. |
 | `reflectionThresholdTokens` | `reflectAfterTokens`, `observationsPoolMaxTokens`, and/or `observationsPoolTargetTokens` | Split. Use `reflectAfterTokens` for reflector cadence, `observationsPoolMaxTokens` for compaction full-fold pressure, and `observationsPoolTargetTokens` for dropper active observation maintenance. |
