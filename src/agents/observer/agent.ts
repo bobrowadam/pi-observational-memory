@@ -9,7 +9,7 @@ import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "../../model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
 import { nowTimestamp, truncateRecordContent } from "../../serialize.js";
 import type { Observation, Relevance } from "../../session-ledger/index.js";
-import { estimateStringTokens } from "../../tokens.js";
+import { observationLineTokenCount } from "../../tokens.js";
 
 interface RunObserverArgs {
 	model: Model<any>;
@@ -120,7 +120,12 @@ export async function runObserver(args: RunObserverArgs): Promise<Observation[] 
 					timestamp: obs.timestamp,
 					relevance: obs.relevance as Relevance,
 					sourceEntryIds,
-					tokenCount: estimateStringTokens(content),
+					tokenCount: observationLineTokenCount({
+						id,
+						timestamp: obs.timestamp,
+						relevance: obs.relevance,
+						content,
+					}),
 				});
 				added++;
 			}
