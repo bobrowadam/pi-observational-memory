@@ -21,7 +21,7 @@ import {
 
 interface RunReflectorArgs {
 	model: Model<any>;
-	apiKey: string;
+	apiKey?: string;
 	headers?: Record<string, string>;
 	reflections: Reflection[];
 	observations: Observation[];

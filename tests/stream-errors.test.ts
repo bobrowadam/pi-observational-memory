@@ -11,7 +11,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 }));
 
 import { logAgentStreamError } from "../src/agents/stream-errors.js";
-import { runObserver } from "../src/agents/observer/agent.js";
+import { ObserverStreamError, runObserver } from "../src/agents/observer/agent.js";
 import { debugLogRelativePath, withDebugLogContext } from "../src/debug-log.js";
 
 describe("agent stream error logging", () => {
@@ -107,7 +107,7 @@ describe("agent stream error logging", () => {
 		})) as any;
 
 		await withDebugLogContext({ enabled: true, sessionId: "session-stream-4" }, async () => {
-			const observations = await runObserver({
+			await expect(runObserver({
 				model: {} as any,
 				apiKey: "test",
 				priorReflections: [],
@@ -115,8 +115,7 @@ describe("agent stream error logging", () => {
 				chunk: "[Source entry id: entry-a]\nSome content.",
 				allowedSourceEntryIds: ["entry-a"],
 				agentLoop: failingLoop,
-			});
-			expect(observations).toBeUndefined();
+			})).rejects.toBeInstanceOf(ObserverStreamError);
 		});
 
 		const events = readLoggedEvents("session-stream-4");

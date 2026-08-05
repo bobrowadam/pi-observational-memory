@@ -6,10 +6,14 @@ const mockAgents = vi.hoisted(() => ({
 	runDropper: vi.fn(),
 }));
 
-vi.mock("../src/agents/observer/agent.js", () => ({ runObserver: mockAgents.runObserver }));
+vi.mock("../src/agents/observer/agent.js", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../src/agents/observer/agent.js")>()),
+	runObserver: mockAgents.runObserver,
+}));
 vi.mock("../src/agents/reflector/agent.js", () => ({ runReflector: mockAgents.runReflector }));
 vi.mock("../src/agents/dropper/agent.js", () => ({ runDropper: mockAgents.runDropper }));
 
+import { ObserverStreamError } from "../src/agents/observer/agent.js";
 import { registerConsolidationTrigger } from "../src/hooks/consolidation-trigger.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
@@ -46,8 +50,10 @@ function setup(args: {
 	passive?: boolean;
 	consolidationInFlight?: boolean;
 	appendEntryReturnsId?: boolean;
+	sessionId?: string;
 }) {
 	let entries = [...args.entries];
+	let sessionId = args.sessionId ?? "session-1";
 	const handlers: Record<string, ((event: unknown, ctx: any) => void) | undefined> = {};
 	const pi = {
 		on: vi.fn((eventName: string, cb: (event: unknown, ctx: any) => void) => {
@@ -104,7 +110,10 @@ function setup(args: {
 		ui: { notify: vi.fn() },
 		model: { provider: "session" },
 		modelRegistry: {},
-		sessionManager: { getBranch: () => entries },
+		sessionManager: {
+			getBranch: () => entries,
+			getSessionId: () => sessionId,
+		},
 	};
 	return {
 		pi,
@@ -114,6 +123,12 @@ function setup(args: {
 		fireAgentStart: () => handlers.agent_start!(undefined, ctx),
 		fireTurnEnd: () => handlers.turn_end!(undefined, ctx),
 		runLaunchedWork: async () => launchedWork?.(),
+		addEntries: (...more: TestEntry[]) => {
+			entries = [...entries, ...more];
+		},
+		setSessionId: (next: string) => {
+			sessionId = next;
+		},
 		getEntries: () => entries,
 	};
 }
@@ -213,6 +228,28 @@ describe("V3 consolidation trigger", () => {
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
 	});
 
+	it("forwards OAuth-shaped auth (headers, no apiKey) to the observer agent", async () => {
+		const obs = observation("cccccccccccc", { sourceEntryIds: ["raw-1"], tokenCount: 4 });
+		mockAgents.runObserver.mockResolvedValueOnce([obs]);
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, pi, runtime } = setup({ entries, reflectAfterTokens: 999 });
+		runtime.resolveModel.mockResolvedValueOnce({
+			ok: true,
+			model: { provider: "kimi-coding" },
+			apiKey: undefined,
+			headers: { Authorization: "Bearer oauth-token" },
+		});
+
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
+			apiKey: undefined,
+			headers: { Authorization: "Bearer oauth-token" },
+		}));
+		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
+	});
+
 	it("uses existing observation coverage and retries larger ranges after no-output", async () => {
 		const prior = observation("cccccccccccc", { sourceEntryIds: ["raw-1"] });
 		const newObs = observation("dddddddddddd", { sourceEntryIds: ["raw-2"] });
@@ -279,6 +316,7 @@ describe("V3 consolidation trigger", () => {
 		expect(mockAgents.runDropper).toHaveBeenCalledOnce();
 		expect(quiet.ctx.ui.notify).not.toHaveBeenCalled();
 
+		// Deliberate empty is routine info: also hidden when quiet.
 		mockAgents.runObserver.mockReset();
 		mockAgents.runObserver.mockResolvedValueOnce(undefined);
 		const noOutput = setup({ entries, reflectAfterTokens: 999, showWorkerNotifications: false });
@@ -286,12 +324,104 @@ describe("V3 consolidation trigger", () => {
 		noOutput.fire();
 		await noOutput.runLaunchedWork();
 
-		expect(noOutput.ctx.ui.notify).toHaveBeenCalledOnce();
-		expect(noOutput.ctx.ui.notify).toHaveBeenCalledWith(
-			"Observational memory: observer returned no observations",
+		expect(noOutput.ctx.ui.notify).not.toHaveBeenCalled();
+
+		// Real failures still surface as warnings when quiet.
+		mockAgents.runObserver.mockReset();
+		mockAgents.runObserver.mockRejectedValueOnce(new ObserverStreamError("error", "prompt is too long"));
+		const failed = setup({ entries, reflectAfterTokens: 999, showWorkerNotifications: false });
+
+		failed.fire();
+		await failed.runLaunchedWork();
+
+		expect(failed.ctx.ui.notify).toHaveBeenCalledOnce();
+		expect(failed.ctx.ui.notify.mock.calls[0][1]).toBe("warning");
+		expect(failed.ctx.ui.notify.mock.calls[0][0]).toContain("observer failed");
+	});
+
+	it("reports deliberate empty as info, not a warning", async () => {
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, ctx } = setup({ entries, reflectAfterTokens: 999 });
+
+		fire();
+		await runLaunchedWork();
+
+		expect(ctx.ui.notify.mock.calls).toEqual([
+			[expect.stringMatching(/^Observational memory: observer running on ~\d+-token chunk$/), "info"],
+			["Observational memory: observer found nothing new in this chunk (coverage unchanged; will retry later)", "info"],
+		]);
+	});
+
+	it("backs off observer re-fires after a deliberate empty until enough new tokens arrive", async () => {
+		const entries = [textCustomMessage("raw-1", "a".repeat(40))]; // 10 tokens
+		const { fire, runLaunchedWork, addEntries, runtime } = setup({ entries, observeAfterTokens: 10, reflectAfterTokens: 999 });
+
+		fire();
+		await runLaunchedWork();
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+		expect(runtime.observerEmptyBackoff).toEqual({
+			sessionIdentity: "session-1",
+			coverageId: undefined,
+			tokensAtEmpty: 10,
+		});
+
+		// Same span, only 5 new tokens (< observeAfterTokens more): no re-fire.
+		addEntries(textCustomMessage("raw-2", "b".repeat(20)));
+		runtime.consolidationInFlight = false;
+		fire();
+		expect(runtime.launchConsolidationTask).toHaveBeenCalledTimes(2);
+		await runLaunchedWork();
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+
+		// 10 more new tokens: backoff satisfied, observer re-fires over the grown span.
+		addEntries(textCustomMessage("raw-3", "c".repeat(40)));
+		runtime.consolidationInFlight = false;
+		mockAgents.runObserver.mockResolvedValueOnce([obsA]);
+		fire();
+		await runLaunchedWork();
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
+		expect(runtime.observerEmptyBackoff).toBeUndefined();
+	});
+
+	it("does not apply deliberate-empty backoff to another session", async () => {
+		const entries = [textCustomMessage("raw-1", "a".repeat(40))];
+		const { fire, runLaunchedWork, runtime, setSessionId } = setup({
+			entries,
+			observeAfterTokens: 10,
+			reflectAfterTokens: 999,
+		});
+
+		fire();
+		await runLaunchedWork();
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(1);
+
+		runtime.consolidationInFlight = false;
+		setSessionId("session-2");
+		fire();
+		await runLaunchedWork();
+
+		expect(mockAgents.runObserver).toHaveBeenCalledTimes(2);
+	});
+
+	it("surfaces API stream errors as observer failure, never as empty", async () => {
+		mockAgents.runObserver.mockRejectedValueOnce(new ObserverStreamError("error", "prompt is too long: 5198507 tokens > 1000000 maximum"));
+		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
+		const { fire, runLaunchedWork, pi, runtime, ctx } = setup({ entries, reflectAfterTokens: 999 });
+
+		fire();
+		await runLaunchedWork();
+
+		expect(runtime.lastObserverError).toContain("prompt is too long");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			'Observational memory: observer failed: observer stream ended with stopReason "error": prompt is too long: 5198507 tokens > 1000000 maximum',
 			"warning",
 		);
+		expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("no observations"), expect.anything());
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+		expect(runtime.observerEmptyBackoff).toBeUndefined();
+		expect(mockAgents.runReflector).not.toHaveBeenCalled();
 	});
+
 
 	it("model resolution failure skips appending and notifies once", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaaaaaa")];
