@@ -32,12 +32,31 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 			return;
 		}
 
-		const entries = ctx.sessionManager.getBranch() as Entry[];
-		const tokens = rawTokensSinceLastCompaction(entries);
+		// Use the session's REAL context usage (provider-reported tokens) instead of a
+		// client-side token estimate. The old raw-token estimate systematically
+		// undercounted the live context — it omitted the system prompt, tool schemas,
+		// thinking/reasoning tokens, and drifted from the provider's own accounting by
+		// ~20-46% in practice. The trigger could therefore lag the visible footer
+		// context percentage badly (e.g. UI at 36% while the estimate sat below a
+		// 0.35 × window threshold), so compaction never fired in long sessions.
+		// ctx.getContextUsage() reports the same basis the footer percentage uses.
+		const contextUsage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+		let tokens = contextUsage?.tokens;
+		if (typeof tokens !== "number" || !Number.isFinite(tokens)) {
+			// getContextUsage is unavailable on older pi hosts, or context is unknown
+			// until the next valid assistant response. Fall back to the raw
+			// source-entry estimate so the trigger still works on older pi versions.
+			const entries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;
+			if (!entries) return;
+			tokens = rawTokensSinceLastCompaction(entries);
+			if (typeof tokens !== "number") return;
+		}
 		// Resolve the proactive-compaction threshold from the active model's context
-		// window when ratio mode is configured. ctx.model is the current session model
-		// (Model<any> | undefined per ExtensionContext).
-		const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
+		// window when ratio mode is configured. Prefer the window reported by
+		// getContextUsage(); fall back to ctx.model (Model<any> | undefined).
+		const contextWindow =
+			contextUsage?.contextWindow
+			?? (typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined);
 		const threshold = resolveCompactAfterTokens(runtime.config, contextWindow);
 		if (tokens < threshold) return;
 
@@ -62,9 +81,17 @@ export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): v
 					);
 					return;
 				}
-				const currentEntries = ctx.sessionManager.getBranch() as Entry[];
-				const currentTokens = rawTokensSinceLastCompaction(currentEntries);
-				if (currentTokens < threshold) {
+				const currentUsage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+				let currentTokens = currentUsage?.tokens;
+				if (typeof currentTokens !== "number") {
+					const currentEntries = ctx.sessionManager?.getBranch?.() as Entry[] | undefined;
+					if (!currentEntries) {
+						runtime.compactInFlight = false;
+						return;
+					}
+					currentTokens = rawTokensSinceLastCompaction(currentEntries);
+				}
+				if (typeof currentTokens !== "number" || currentTokens < threshold) {
 					runtime.compactInFlight = false;
 					if (hasUI) ui?.notify(
 						"Observational memory: compaction skipped — another compaction already ran before deferred compaction",

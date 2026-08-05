@@ -21,12 +21,14 @@ import {
 	latestCoverageIndex,
 	latestCoverageMarkerId,
 	observationToSummaryLine,
+	realTokensSinceAnchor,
 	rawTokensSinceObservationCoverage,
 	rawTokensSinceReflectionCoverage,
 	reflectionToSummaryLine,
 	type Entry,
 	type Observation,
 	type Reflection,
+	type V3MemoryCustomType,
 } from "../session-ledger/index.js";
 
 type ResolvedModel = Extract<ResolveResult, { ok: true }>;
@@ -37,6 +39,7 @@ type ConsolidationCtx = {
 	ui?: { notify: (message: string, type?: "warning" | "info" | "error") => void };
 	model: unknown;
 	modelRegistry: any;
+	getContextUsage?: () => { tokens?: number | null; contextWindow?: number } | undefined;
 	sessionManager: {
 		getBranch: () => unknown;
 		getSessionId?: () => string;
@@ -71,9 +74,39 @@ function mergeReflections(existing: Reflection[], additional: Reflection[]): Ref
 	return merged;
 }
 
-function anyStageDue(entries: Entry[], runtime: Runtime): boolean {
-	return rawTokensSinceObservationCoverage(entries) >= runtime.config.observeAfterTokens
-		|| rawTokensSinceReflectionCoverage(entries) >= runtime.config.reflectAfterTokens;
+/**
+ * Real current context tokens from the session (provider-reported usage, the
+ * same basis the footer percentage uses). Falls back to undefined when the
+ * host pi lacks getContextUsage or the count is unknown (e.g. right after a
+ * compaction, before the next valid assistant response).
+ */
+function realContextTokens(ctx: ConsolidationCtx): number | undefined {
+	const usage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
+	const tokens = usage?.tokens;
+	return typeof tokens === "number" && Number.isFinite(tokens) ? tokens : undefined;
+}
+
+function stageDue(
+	entries: Entry[],
+	runtime: Runtime,
+	currentTokens: number | undefined,
+	customType: V3MemoryCustomType,
+	rawEstimateFn: (entries: Entry[]) => number,
+	threshold: number,
+): boolean {
+	if (currentTokens !== undefined) {
+		const real = realTokensSinceAnchor(entries, customType, currentTokens);
+		if (real !== undefined) return real >= threshold;
+	}
+	// Real delta unmeasurable (no usage baseline, or accounting basis changed) or
+	// old pi host without getContextUsage — fall back to the raw estimate, which
+	// self-limits after coverage and cannot over-fire or starve.
+	return rawEstimateFn(entries) >= threshold;
+}
+
+function anyStageDue(entries: Entry[], runtime: Runtime, currentTokens: number | undefined): boolean {
+	return stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens)
+		|| stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, rawTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
 }
 
 function shouldNotifyWorker(runtime: Runtime, ctx: ConsolidationCtx): boolean {
@@ -127,7 +160,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 	if (runtime.consolidationInFlight) return;
 
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	if (!anyStageDue(entries, runtime)) return;
+	if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return;
 
 	const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
 	const consolidationCtx: ConsolidationCtx = {
@@ -136,6 +169,7 @@ function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: Conso
 		ui: ctx.ui,
 		model: ctx.model,
 		modelRegistry: ctx.modelRegistry,
+		getContextUsage: ctx.getContextUsage,
 		sessionManager: ctx.sessionManager,
 	};
 
@@ -191,7 +225,9 @@ async function runObserverStage(
 	resolveModel: (stage: "observer") => Promise<ResolvedModel | undefined>,
 ): Promise<StageOutcome> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	const tokens = rawTokensSinceObservationCoverage(entries);
+	const currentTokens = realContextTokens(ctx);
+	const real = currentTokens !== undefined ? realTokensSinceAnchor(entries, OM_OBSERVATIONS_RECORDED, currentTokens) : undefined;
+	const tokens = real !== undefined ? real : rawTokensSinceObservationCoverage(entries); // fallback: no usage baseline / basis change
 	if (tokens < runtime.config.observeAfterTokens) return "continue";
 
 	const sessionMetadata = debugSessionMetadata(ctx);
@@ -327,7 +363,9 @@ async function runReflectorStage(
 	resolveModel: (stage: "reflector") => Promise<ResolvedModel | undefined>,
 ): Promise<ReflectorStageResult> {
 	const entries = ctx.sessionManager.getBranch() as Entry[];
-	const reflectionTokens = rawTokensSinceReflectionCoverage(entries);
+	const currentTokens = realContextTokens(ctx);
+	const real = currentTokens !== undefined ? realTokensSinceAnchor(entries, OM_REFLECTIONS_RECORDED, currentTokens) : undefined;
+	const reflectionTokens = real !== undefined ? real : rawTokensSinceReflectionCoverage(entries); // fallback: no usage baseline / basis change
 	if (reflectionTokens < runtime.config.reflectAfterTokens) return { outcome: "continue", sameRunReflections: [] };
 
 	const observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
