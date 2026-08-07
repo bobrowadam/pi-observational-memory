@@ -87,7 +87,8 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Observations: 2 recorded / 1 dropped / 1 active / 1 visible +1 -1");
 		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
 		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
-		expect(output).toContain("Active observation pool: ~7 / 20 target tokens (35%)");
+		// Active pool counts the full rendered line (id + timestamp + relevance + content).
+		expect(output).toContain("Active observation pool: ~19 / 20 target tokens (95%)");
 		expect(output).not.toContain("Visible:");
 		expect(output).not.toContain("Drift:");
 		expect(output).not.toContain("full truth");
@@ -115,7 +116,8 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Next compaction:");
 		expect(output).toContain("/ 30 tokens");
 		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
-		expect(output).toContain("Active observation pool: ~5 / 20 target tokens (25%)");
+		// Active pool counts the full rendered line, unlike the visible pool's stored tokenCount.
+		expect(output).toContain("Active observation pool: ~19 / 20 target tokens (95%)");
 		expect(output).toContain("Reflection pool:         ~3 tokens");
 		expect(output).not.toContain("Observation pool:");
 		expect(output).not.toContain("Full fold pool:");
@@ -123,7 +125,8 @@ describe("V3 /om:status", () => {
 	});
 
 	it("shows over-target active observation pool in the Activity section", async () => {
-		const obs = observation("aaaaaaaaaaaa", { tokenCount: 25 });
+		// Pad content so the rendered line is exactly 25 tokens (100 chars).
+		const obs = observation("aaaaaaaaaaaa", { content: "x".repeat(51) });
 		const entries = [
 			textCustomMessage("raw-1", "aaaaaaaa"),
 			observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "raw-1" }),

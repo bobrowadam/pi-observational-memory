@@ -296,7 +296,7 @@ describe("V3 consolidation trigger", () => {
 			[expect.stringMatching(/^Observational memory: observer running on ~\d+-token chunk$/), "info"],
 			["Observational memory: 1 observation recorded", "info"],
 			["Observational memory: reflector running (~2 tokens)", "info"],
-			["Observational memory: dropper running after reflection — active observation pool ~10 / 5 target tokens (200%)", "info"],
+			["Observational memory: dropper running after reflection — active observation pool ~19 / 5 target tokens (380%)", "info"],
 		]);
 	});
 
