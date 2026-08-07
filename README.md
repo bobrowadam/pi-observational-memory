@@ -290,6 +290,7 @@ Valid `model.thinking` values are:
 * `medium`
 * `high`
 * `xhigh`
+* `max`
 
 If no `model` is configured, memory workers use the session model.
 

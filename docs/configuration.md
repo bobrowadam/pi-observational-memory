@@ -69,7 +69,7 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
-Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, and `xhigh`.
+Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
 

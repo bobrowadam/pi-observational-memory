@@ -84,7 +84,7 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 	return config.compactAfterTokens;
 }
 
-export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /** Observer chunk cap used when no config is set and the model's context window is unknown. */
 export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 60_000;
