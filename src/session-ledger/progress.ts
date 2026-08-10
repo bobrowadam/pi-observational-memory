@@ -176,6 +176,18 @@ export function realContextTokensAfterCompaction(entries: Entry[], compactionIdx
 	return undefined;
 }
 
+function hasModelChangeAfterCompactionBaseline(entries: Entry[], compactionIdx: number): boolean {
+	let baselineFound = false;
+	for (let i = compactionIdx + 1; i < entries.length; i++) {
+		if (!baselineFound && validAssistantContextTokens(entries[i]) !== undefined) {
+			baselineFound = true;
+			continue;
+		}
+		if (baselineFound && entries[i].type === "model_change") return true;
+	}
+	return false;
+}
+
 /**
  * Real context tokens at the time observation coverage ended: last valid
  * assistant usage at/before the covered entry. Returns undefined when no valid
@@ -233,4 +245,30 @@ export function rawTokensSinceLastCompaction(entries: Entry[]): number {
 
 	if (firstKeptIndex === -1) return rawTokensAfterIndex(entries, compactionIndex);
 	return rawTokensAfterIndex(entries, firstKeptIndex - 1);
+}
+
+export type CompactionProgress = {
+	tokens: number;
+	source: "provider" | "raw";
+};
+
+/**
+ * Returns context growth since the latest successful compaction when Pi's
+ * provider usage is comparable. Raw source-token progress is the safe fallback.
+ */
+export function compactionProgress(entries: Entry[], currentContextTokens: number | null | undefined): CompactionProgress {
+	const raw = rawTokensSinceLastCompaction(entries);
+	if (typeof currentContextTokens !== "number" || !Number.isFinite(currentContextTokens)) {
+		return { tokens: raw, source: "raw" };
+	}
+
+	const compactionIdx = findLastCompactionIndex(entries);
+	if (compactionIdx >= 0 && hasModelChangeAfterCompactionBaseline(entries, compactionIdx)) {
+		return { tokens: raw, source: "raw" };
+	}
+
+	const real = realTokensSinceAnchor(entries, undefined, currentContextTokens);
+	return real === undefined
+		? { tokens: raw, source: "raw" }
+		: { tokens: real, source: "provider" };
 }
