@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	compactionProgress,
 	earlierCoverageMarkerId,
 	entryIndexById,
 	isSourceEntry,
@@ -18,6 +19,7 @@ import {
 	V3_REFLECTIONS_RECORDED,
 	branchSummary,
 	compactionEntry,
+	rawMessage,
 	observation,
 	observationsDroppedEntry,
 	observationsRecordedEntry,
@@ -139,5 +141,38 @@ describe("session-ledger V3 progress helpers", () => {
 		];
 
 		expect(rawTokensSinceLastCompaction(entries)).toBe(3); // raw-1 + raw-2 from live tail starting at firstKeptEntryId
+	});
+
+	it("uses provider context growth after compaction", () => {
+		const entries = [
+			compactionEntry("cmp-1"),
+			rawMessage("assistant-1", "done", {
+				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 60072 } },
+			}),
+		];
+
+		expect(compactionProgress(entries, 135636)).toEqual({ tokens: 75564, source: "provider" });
+	});
+
+	it("falls back to raw progress when provider usage has no post-compaction baseline", () => {
+		const entries = [
+			compactionEntry("cmp-1"),
+			textCustomMessage("raw-1", "aaaaaaaa"),
+		];
+
+		expect(compactionProgress(entries, 135636)).toEqual({ tokens: 2, source: "raw" });
+	});
+
+	it("falls back to raw progress after a model change", () => {
+		const entries = [
+			compactionEntry("cmp-1"),
+			rawMessage("assistant-1", "done", {
+				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 60072 } },
+			}),
+			{ type: "model_change", id: "model-1", timestamp: "2026-05-02T10:00:00.000Z" },
+			textCustomMessage("raw-1", "aaaaaaaa"),
+		];
+
+		expect(compactionProgress(entries, 135636)).toEqual({ tokens: 2, source: "raw" });
 	});
 });

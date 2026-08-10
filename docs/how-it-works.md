@@ -204,11 +204,12 @@ It skips when:
 - `passive` is true;
 - compaction is already in flight;
 - the agent end event is a retryable error;
-- raw/source tokens since last compaction are below `compactAfterTokens`;
+- provider context growth since the latest successful compaction is below `compactAfterTokens`;
+- the provider baseline is unavailable or incomparable and estimated source progress is below `compactAfterTokens`;
 - Pi is not idle after the deferred check;
 - the threshold is no longer met after the deferred check.
 
-When all checks pass, it calls `ctx.compact()`.
+The provider baseline uses the first valid assistant usage after compaction. A model/provider change after that baseline causes fallback to estimated source progress until a later successful compaction creates a new provider baseline. When all checks pass, it calls `ctx.compact()`.
 
 This trigger does not wait for observer, reflector, or dropper promises. That is intentional: background memory work should never make compaction feel stuck.
 
