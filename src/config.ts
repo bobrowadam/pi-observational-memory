@@ -3,10 +3,13 @@ import { join } from "node:path";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
+export type MemoryWorker = "observer" | "reflector" | "dropper";
+
 export interface ConfiguredModel {
 	provider: string;
 	id: string;
 	thinking?: ModelThinkingLevel;
+	thinkingByWorker?: Partial<Record<MemoryWorker, ModelThinkingLevel>>;
 }
 
 /**
@@ -85,6 +88,11 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 }
 
 export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const MEMORY_WORKER_VALUES: readonly MemoryWorker[] = ["observer", "reflector", "dropper"] as const;
+
+export function resolveWorkerThinkingLevel(config: Config, worker: MemoryWorker): ModelThinkingLevel {
+	return config.model?.thinkingByWorker?.[worker] ?? config.model?.thinking ?? "low";
+}
 
 /** Observer chunk cap used when no config is set and the model's context window is unknown. */
 export const OBSERVER_CHUNK_FALLBACK_MAX_TOKENS = 60_000;
@@ -176,6 +184,14 @@ function normalizeModel(value: unknown): ConfiguredModel | undefined {
 	if (!provider || !id) return undefined;
 	const model: ConfiguredModel = { provider, id };
 	if (isThinkingLevel(value.thinking)) model.thinking = value.thinking;
+	if (isRecord(value.thinkingByWorker)) {
+		const thinkingByWorker: Partial<Record<MemoryWorker, ModelThinkingLevel>> = {};
+		for (const worker of MEMORY_WORKER_VALUES) {
+			const thinking = value.thinkingByWorker[worker];
+			if (isThinkingLevel(thinking)) thinkingByWorker[worker] = thinking;
+		}
+		if (Object.keys(thinkingByWorker).length > 0) model.thinkingByWorker = thinkingByWorker;
+	}
 	return model;
 }
 

@@ -39,7 +39,8 @@ The extension loads config once for its runtime. After changing settings, restar
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
-      "thinking": "low"
+      "thinking": "low",
+      "thinkingByWorker": { "reflector": "high" }
     },
     "showWorkerNotifications": true,
     "passive": false,
@@ -64,12 +65,13 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `model` | object | unset | Optional model override for observer, reflector, and dropper. |
 | `model.provider` | string | unset | Provider name in Pi's model registry. Required when `model` is set. |
 | `model.id` | string | unset | Model id in Pi's model registry. Required when `model` is set. |
-| `model.thinking` | enum | unset; workers fall back to `low` | Optional reasoning/thinking level for memory workers. |
+| `model.thinking` | enum | unset; workers fall back to `low` | Shared reasoning/thinking level for memory workers. |
+| `model.thinkingByWorker` | object | unset | Optional `observer`, `reflector`, and `dropper` overrides; each value uses the thinking enum. |
 | `showWorkerNotifications` | boolean | `true` | Shows routine observer, reflector, and dropper progress notifications. |
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
-Valid `model.thinking` values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+Valid thinking values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A valid `model.thinkingByWorker` value takes precedence for that worker; otherwise it uses `model.thinking`, then `low`.
 
 Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
 
@@ -151,13 +153,14 @@ Set `model` when you want the observer, reflector, and dropper to use a cheaper 
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
-      "thinking": "low"
+      "thinking": "low",
+      "thinkingByWorker": { "reflector": "high" }
     }
   }
 }
 ```
 
-`provider` and `id` must both be non-empty strings. `thinking` is optional. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. Memory workers accept either an API key or OAuth-style auth headers (e.g. `Authorization: Bearer …`), so OAuth-authenticated providers work without an API key. If no usable model or credentials are available, the relevant background worker skips/fails safely rather than inventing memory.
+`provider` and `id` must both be non-empty strings. `thinking` and `thinkingByWorker` are optional. Per-worker values take precedence over the shared thinking level. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. Memory workers accept either an API key or OAuth-style auth headers (e.g. `Authorization: Bearer …`), so OAuth-authenticated providers work without an API key. If no usable model or credentials are available, the relevant background worker skips/fails safely rather than inventing memory.
 
 ## `showWorkerNotifications`
 

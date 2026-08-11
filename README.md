@@ -216,7 +216,8 @@ A typical config:
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
-      "thinking": "low"
+      "thinking": "low",
+      "thinkingByWorker": { "reflector": "high" }
     },
     "showWorkerNotifications": true,
     "passive": false,
@@ -280,12 +281,14 @@ on the `Next compaction` line regardless of mode.
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
-| `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking }`.                              |
+| `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking, thinkingByWorker }`.            |
 | `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, and dropper progress notifications. Warnings and errors are unaffected. |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |
 
-Valid `model.thinking` values are:
+`model.thinkingByWorker` can override `observer`, `reflector`, or `dropper` individually. Unset workers use `model.thinking`, then fall back to `low`.
+
+Valid thinking values are:
 
 * `off`
 * `minimal`

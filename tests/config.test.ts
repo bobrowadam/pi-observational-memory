@@ -9,7 +9,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => mock.agentDir,
 }));
 
-import { DEFAULTS, loadConfig, readEnvConfig, resolveCompactAfterTokens } from "../src/config.js";
+import { DEFAULTS, loadConfig, readEnvConfig, resolveCompactAfterTokens, resolveWorkerThinkingLevel } from "../src/config.js";
 
 function writeJson(path: string, value: unknown) {
 	mkdirSync(join(path, ".."), { recursive: true });
@@ -98,6 +98,35 @@ describe("V3 config", () => {
 		expect(loadConfig(cwd, {})).toMatchObject({
 			model: { provider: "anthropic", id: "claude", thinking: "max" },
 		});
+	});
+
+	it("resolves valid per-worker thinking overrides before the shared fallback", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": {
+				model: {
+					provider: "openai",
+					id: "gpt-5.6-luna",
+					thinking: "low",
+					thinkingByWorker: {
+						observer: "minimal",
+						reflector: "high",
+						dropper: "invalid",
+						unknown: "max",
+					},
+				},
+			},
+		});
+
+		const config = loadConfig(cwd, {});
+		expect(config.model).toEqual({
+			provider: "openai",
+			id: "gpt-5.6-luna",
+			thinking: "low",
+			thinkingByWorker: { observer: "minimal", reflector: "high" },
+		});
+		expect(resolveWorkerThinkingLevel(config, "observer")).toBe("minimal");
+		expect(resolveWorkerThinkingLevel(config, "reflector")).toBe("high");
+		expect(resolveWorkerThinkingLevel(config, "dropper")).toBe("low");
 	});
 
 	it("ignores invalid V3 values", () => {

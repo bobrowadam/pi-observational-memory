@@ -77,7 +77,12 @@ function setup(args: {
 			observationsPoolMaxTokens: args.observationsPoolMaxTokens ?? 100,
 			observationsPoolTargetTokens: args.observationsPoolTargetTokens ?? Math.floor((args.observationsPoolMaxTokens ?? 100) / 2),
 			agentMaxTurns: 9,
-			model: { provider: "anthropic", id: "memory", thinking: "minimal" },
+			model: {
+				provider: "anthropic",
+				id: "memory",
+				thinking: "minimal",
+				thinkingByWorker: { observer: "low", reflector: "high", dropper: "low" },
+			},
 		},
 		consolidationInFlight: args.consolidationInFlight ?? false,
 		consolidationPhase: undefined as "observer" | "reflector" | "dropper" | undefined,
@@ -223,7 +228,7 @@ describe("V3 consolidation trigger", () => {
 		expect(mockAgents.runObserver).toHaveBeenCalledWith(expect.objectContaining({
 			allowedSourceEntryIds: ["raw-1"],
 			maxTurns: 9,
-			thinkingLevel: "minimal",
+			thinkingLevel: "low",
 		}));
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_OBSERVATIONS_RECORDED, { observations: [obs], coversUpToId: "raw-1" });
 	});
@@ -466,7 +471,7 @@ describe("V3 consolidation trigger", () => {
 		fire();
 		await runLaunchedWork();
 
-		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ observations: [obsA], maxTurns: 9, thinkingLevel: "minimal" }));
+		expect(mockAgents.runReflector).toHaveBeenCalledWith(expect.objectContaining({ observations: [obsA], maxTurns: 9, thinkingLevel: "high" }));
 		expect(mockAgents.runDropper).not.toHaveBeenCalled();
 		expect(pi.appendEntry).toHaveBeenCalledWith(OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-1" });
 	});
@@ -486,7 +491,11 @@ describe("V3 consolidation trigger", () => {
 		await runLaunchedWork();
 
 		expect(mockAgents.runReflector).toHaveBeenCalled();
-		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({ reflections: [newRef], observations: [obsA] }));
+		expect(mockAgents.runDropper).toHaveBeenCalledWith(expect.objectContaining({
+			reflections: [newRef],
+			observations: [obsA],
+			thinkingLevel: "low",
+		}));
 		expect(pi.appendEntry.mock.calls[0]).toEqual([OM_REFLECTIONS_RECORDED, { reflections: [newRef], coversUpToId: "raw-1" }]);
 		expect(pi.appendEntry.mock.calls[1]).toEqual([OM_OBSERVATIONS_DROPPED, { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "raw-1" }]);
 	});

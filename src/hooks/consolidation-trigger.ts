@@ -4,7 +4,7 @@ import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { ObserverStreamError, runObserver } from "../agents/observer/agent.js";
 import { runReflector } from "../agents/reflector/agent.js";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
-import { resolveObserverChunkMaxTokens } from "../config.js";
+import { resolveObserverChunkMaxTokens, resolveWorkerThinkingLevel } from "../config.js";
 import type { ResolveResult, Runtime } from "../runtime.js";
 import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
@@ -316,7 +316,7 @@ async function runObserverStage(
 			chunk,
 			allowedSourceEntryIds: sourceEntryIds,
 			maxTurns: runtime.config.agentMaxTurns,
-			thinkingLevel: runtime.config.model?.thinking ?? "low",
+			thinkingLevel: resolveWorkerThinkingLevel(runtime.config, "observer"),
 		});
 	} catch (error) {
 		if (error instanceof ObserverStreamError) {
@@ -386,7 +386,7 @@ async function runReflectorStage(
 		reflections: folded.reflections,
 		observations: folded.activeObservations,
 		maxTurns: runtime.config.agentMaxTurns,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolveWorkerThinkingLevel(runtime.config, "reflector"),
 	});
 	if (!reflections) return { outcome: "continue", sameRunReflections: [] };
 
@@ -459,7 +459,7 @@ async function runDropperStage(
 		observations: folded.activeObservations,
 		targetTokens: runtime.config.observationsPoolTargetTokens,
 		maxTurns: runtime.config.agentMaxTurns,
-		thinkingLevel: runtime.config.model?.thinking ?? "low",
+		thinkingLevel: resolveWorkerThinkingLevel(runtime.config, "dropper"),
 	});
 	const coversUpToId = earlierCoverageMarkerId(entries, observationCoverageId, sameRunReflectionCoverageId);
 	const data = coversUpToId && droppedIds ? buildObservationsDroppedData(droppedIds, coversUpToId) : undefined;
