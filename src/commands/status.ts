@@ -6,7 +6,7 @@ import {
 	diffProjection,
 	foldLedger,
 	fullProjection,
-	compactionProgress,
+	rawTokensSinceLastCompaction,
 	rawTokensSinceObservationCoverage,
 	rawTokensSinceReflectionCoverage,
 	visibleProjection,
@@ -61,13 +61,9 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 			);
 			const obsProgress = rawTokensSinceObservationCoverage(entries);
 			const reflectionProgress = rawTokensSinceReflectionCoverage(entries);
-			const contextUsage = typeof ctx.getContextUsage === "function" ? ctx.getContextUsage() : undefined;
-			const compaction = compactionProgress(entries, contextUsage?.tokens);
-			const contextWindow =
-				contextUsage?.contextWindow
-				?? (typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined);
+			const compactionProgress = rawTokensSinceLastCompaction(entries);
+			const contextWindow = typeof ctx.model?.contextWindow === "number" ? ctx.model.contextWindow : undefined;
 			const compactThreshold = resolveCompactAfterTokens(runtime.config, contextWindow);
-			const compactionMetricLabel = compaction.source === "provider" ? "provider context growth" : "estimated source";
 
 			const passiveLines = runtime.config.passive === true
 				? [
@@ -86,7 +82,7 @@ export function registerStatusCommand(pi: ExtensionAPI, runtime: Runtime): void 
 				"── Activity ──",
 				`Next observation: ~${obsProgress.toLocaleString()} / ${runtime.config.observeAfterTokens.toLocaleString()} tokens (${pct(obsProgress, runtime.config.observeAfterTokens)}%)`,
 				`Next reflection:  ~${reflectionProgress.toLocaleString()} / ${runtime.config.reflectAfterTokens.toLocaleString()} tokens (${pct(reflectionProgress, runtime.config.reflectAfterTokens)}%)`,
-				`Next compaction:  ~${compaction.tokens.toLocaleString()} / ${compactThreshold.toLocaleString()} ${compactionMetricLabel} tokens (${pct(compaction.tokens, compactThreshold)}%)`,
+				`Next compaction:  ~${compactionProgress.toLocaleString()} / ${compactThreshold.toLocaleString()} estimated source tokens (${pct(compactionProgress, compactThreshold)}%)`,
 				`Visible observation pool: ~${visibleObservationTokens.toLocaleString()} / ${runtime.config.observationsPoolMaxTokens.toLocaleString()} tokens (${pct(visibleObservationTokens, runtime.config.observationsPoolMaxTokens)}%)`,
 				`Active observation pool: ~${activeObservationPool.observationTokens.toLocaleString()} / ${runtime.config.observationsPoolTargetTokens.toLocaleString()} target tokens (${pct(activeObservationPool.observationTokens, runtime.config.observationsPoolTargetTokens)}%)`,
 				`Reflection pool:         ~${visibleReflectionTokens.toLocaleString()} tokens`,

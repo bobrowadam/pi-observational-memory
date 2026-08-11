@@ -184,14 +184,19 @@ describe("V3 compaction trigger", () => {
 		expect(ctx.compact).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not compact when full context exceeds the threshold but anchored growth does not", async () => {
+	it("does not compact when provider context and anchored growth exceed the threshold but raw progress does not", async () => {
 		const { handler, runtime } = captureHandler({ compactAfterTokens: 130000 });
 		const branch = [
-			compactionEntry("cmp-1"),
-			rawMessage("assistant-1", "done", {
-				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 60072 } },
+			compactionEntry("cmp-1", { firstKeptEntryId: "baseline" }),
+			rawMessage("baseline", "baseline", {
+				message: {
+					role: "assistant",
+					content: "baseline",
+					stopReason: "end_turn",
+					usage: { totalTokens: 5000 },
+				},
 			}),
-			textCustomMessage("raw-1", "small"),
+			textCustomMessage("raw-1", "a".repeat(302_248)), // 75,562 tokens plus the 2-token baseline message
 		];
 		const ctx = fakeCtx([branch], {
 			getContextUsage: vi.fn(() => ({ tokens: 135636, contextWindow: 200000 })),
@@ -204,10 +209,17 @@ describe("V3 compaction trigger", () => {
 		expect(runtime.compactInFlight).toBe(false);
 	});
 
-	it("uses provider context from zero before the first compaction", async () => {
-		const { handler } = captureHandler({ compactAfterTokens: 130000 });
-		const ctx = fakeCtx([dueBranch], {
-			getContextUsage: vi.fn(() => ({ tokens: 130000, contextWindow: 200000 })),
+	it("uses raw progress when provider growth is lower than the raw threshold", async () => {
+		const { handler } = captureHandler({ compactAfterTokens: 3 });
+		const branch = [
+			compactionEntry("cmp-1", { firstKeptEntryId: "raw-1" }),
+			rawMessage("assistant-1", "done", {
+				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 100 } },
+			}),
+			textCustomMessage("raw-1", "aaaaaaaaaaaa"),
+		];
+		const ctx = fakeCtx([branch], {
+			getContextUsage: vi.fn(() => ({ tokens: 101, contextWindow: 200000 })),
 		});
 
 		handler(agentEnd(), ctx);
@@ -216,16 +228,72 @@ describe("V3 compaction trigger", () => {
 		expect(ctx.compact).toHaveBeenCalledTimes(1);
 	});
 
-	it("compacts when anchored provider growth equals the threshold", async () => {
-		const { handler } = captureHandler({ compactAfterTokens: 130000 });
+	it("uses raw progress from the first kept entry through the current branch", async () => {
+		const { handler } = captureHandler({ compactAfterTokens: 3 });
 		const branch = [
-			compactionEntry("cmp-1"),
-			rawMessage("assistant-1", "done", {
-				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 60000 } },
-			}),
+			textCustomMessage("old", "bbbbbbbbbbbb"),
+			compactionEntry("cmp-1", { firstKeptEntryId: "kept" }),
+			textCustomMessage("kept", "aaaaaaaa"),
+			textCustomMessage("new", "bbbbbbbbbbbb"),
 		];
 		const ctx = fakeCtx([branch], {
-			getContextUsage: vi.fn(() => ({ tokens: 190000, contextWindow: 200000 })),
+			getContextUsage: vi.fn(() => ({ tokens: 1, contextWindow: 200000 })),
+		});
+
+		handler(agentEnd(), ctx);
+		await vi.runAllTimersAsync();
+
+		expect(ctx.compact).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses raw progress from the branch start before the first compaction", async () => {
+		const { handler } = captureHandler({ compactAfterTokens: 3 });
+		const ctx = fakeCtx([dueBranch], {
+			getContextUsage: vi.fn(() => ({ tokens: 1, contextWindow: 200000 })),
+		});
+
+		handler(agentEnd(), ctx);
+		await vi.runAllTimersAsync();
+
+		expect(ctx.compact).toHaveBeenCalledTimes(1);
+	});
+
+	it("uses the same raw metric after deferred re-check", async () => {
+		const { handler, runtime } = captureHandler({ compactAfterTokens: 3 });
+		const ctx = fakeCtx([dueBranch, dueBranch], {
+			getContextUsage: vi.fn(() => ({ tokens: 1, contextWindow: 200000 })),
+		});
+
+		handler(agentEnd(), ctx);
+		await vi.runAllTimersAsync();
+
+		expect(ctx.compact).toHaveBeenCalledTimes(1);
+		expect(runtime.compactInFlight).toBe(true);
+	});
+
+	it("ignores high provider context before the first compaction", async () => {
+		const { handler } = captureHandler({ compactAfterTokens: 130000 });
+		const ctx = fakeCtx([dueBranch], {
+			getContextUsage: vi.fn(() => ({ tokens: 130000, contextWindow: 200000 })),
+		});
+
+		handler(agentEnd(), ctx);
+		await vi.runAllTimersAsync();
+
+		expect(ctx.compact).not.toHaveBeenCalled();
+	});
+
+	it("compacts when raw progress equals the threshold", async () => {
+		const { handler } = captureHandler({ compactAfterTokens: 3 });
+		const branch = [
+			compactionEntry("cmp-1", { firstKeptEntryId: "raw-1" }),
+			rawMessage("assistant-1", "done", {
+				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 100 } },
+			}),
+			textCustomMessage("raw-1", "aaaaaaaaaaaa"),
+		];
+		const ctx = fakeCtx([branch], {
+			getContextUsage: vi.fn(() => ({ tokens: 101, contextWindow: 200000 })),
 		});
 
 		handler(agentEnd(), ctx);
@@ -247,18 +315,10 @@ describe("V3 compaction trigger", () => {
 		expect(ctx.compact).not.toHaveBeenCalled();
 	});
 
-	it("rechecks anchored growth after deferral", async () => {
-		const { handler, runtime } = captureHandler({ compactAfterTokens: 130000 });
-		const branch = [
-			compactionEntry("cmp-1"),
-			rawMessage("assistant-1", "done", {
-				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 60000 } },
-			}),
-		];
-		const ctx = fakeCtx([branch], {
-			getContextUsage: vi.fn()
-				.mockReturnValueOnce({ tokens: 190000, contextWindow: 200000 })
-				.mockReturnValueOnce({ tokens: 120000, contextWindow: 200000 }),
+	it("rechecks raw progress after deferral", async () => {
+		const { handler, runtime } = captureHandler({ compactAfterTokens: 3 });
+		const ctx = fakeCtx([dueBranch, belowBranch], {
+			getContextUsage: vi.fn(() => ({ tokens: 1, contextWindow: 200000 })),
 		});
 
 		handler(agentEnd(), ctx);
@@ -319,7 +379,7 @@ describe("V3 compaction trigger", () => {
 			expect(ctx.compact).not.toHaveBeenCalled();
 		});
 
-		it("prefers the provider context window in ratio mode", async () => {
+		it("uses the model context window in ratio mode", async () => {
 			const { handler } = captureHandler({
 				compactAfterTokens: 81000,
 				compactAfterTokensMode: "ratio",
@@ -333,7 +393,7 @@ describe("V3 compaction trigger", () => {
 			handler(agentEnd(), ctx);
 			await vi.runAllTimersAsync();
 
-			expect(ctx.compact).not.toHaveBeenCalled();
+			expect(ctx.compact).toHaveBeenCalledTimes(1);
 		});
 
 		it("falls back to calibrated value when model.contextWindow is unavailable", async () => {
