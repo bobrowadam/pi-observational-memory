@@ -131,12 +131,13 @@ describe("V3 /om:status", () => {
 		expect(output).not.toContain("visible observation tokens");
 	});
 
-	it("shows provider context growth since compaction", async () => {
+	it("shows raw source progress and ignores provider context", async () => {
 		const entries = [
-			compactionEntry("cmp-1"),
+			compactionEntry("cmp-1", { firstKeptEntryId: "raw-1" }),
 			rawMessage("assistant-1", "done", {
 				message: { role: "assistant", content: "done", stopReason: "end_turn", usage: { totalTokens: 60072 } },
 			}),
+			textCustomMessage("raw-1", "aaaaaaaaaaaa"),
 		];
 
 		const output = await setup({
@@ -144,7 +145,7 @@ describe("V3 /om:status", () => {
 			contextUsage: { tokens: 135636, contextWindow: 200000 },
 		}).run();
 
-		expect(output).toContain("Next compaction:  ~75,564 / 30 provider context growth tokens");
+		expect(output).toContain("Next compaction:  ~3 / 30 estimated source tokens");
 	});
 
 	it("shows over-target active observation pool in the Activity section", async () => {
@@ -216,7 +217,7 @@ describe("V3 /om:status", () => {
 			expect(output).toContain("Next compaction:  ~0 / 500,000 estimated source tokens (0%)");
 		});
 
-		it("prefers provider contextWindow over model contextWindow in ratio mode", async () => {
+		it("uses model contextWindow in ratio mode", async () => {
 			const output = await setup({
 				entries: [],
 				runtime: {
@@ -235,7 +236,7 @@ describe("V3 /om:status", () => {
 				contextUsage: { tokens: null, contextWindow: 200_000 },
 			}).run();
 
-			expect(output).toContain("Next compaction:  ~0 / 100,000 estimated source tokens (0%)");
+			expect(output).toContain("Next compaction:  ~0 / 50,000 estimated source tokens (0%)");
 		});
 
 		it("falls back to calibrated threshold when model is unavailable in ratio mode", async () => {
