@@ -204,6 +204,31 @@ describe("V3 reflector agent", () => {
 		expect(result?.map((item) => item.content)).toEqual(["New durable fact."]);
 	});
 
+	it("rejects reflections whose ids collide with historical records while prompting with active records", async () => {
+		const historicalContent = "Historical durable fact.";
+		const active = reflection("cccccccccccc", ["aaaaaaaaaaaa"], { content: "Active durable fact." });
+		let userText = "";
+		const loop = fakeAgentLoop(async (prompts, context) => {
+			userText = prompts[0].content[0].text;
+			await context.tools[0].execute("tool-1", {
+				reflections: [
+					{ content: historicalContent, supportingObservationIds: ["aaaaaaaaaaaa"] },
+					{ content: "New durable fact.", supportingObservationIds: ["bbbbbbbbbbbb"] },
+				],
+			});
+		});
+
+		const result = await runReflector({
+			...baseArgs,
+			reflections: [active],
+			historicalReflectionIds: [hashId(historicalContent)],
+			agentLoop: loop,
+		});
+
+		expect(userText).toContain("[cccccccccccc] Active durable fact.");
+		expect(result?.map((item) => item.content)).toEqual(["New durable fact."]);
+	});
+
 	it("returns undefined when no tool call records reflections", async () => {
 		const loop = fakeAgentLoop(() => {});
 		await expect(runReflector({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();

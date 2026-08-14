@@ -43,6 +43,8 @@ describe("V3 config", () => {
 			compactAfterTokensRatio: 0.68,
 			observationsPoolMaxTokens: 20000,
 			observationsPoolTargetTokens: 10000,
+			reflectionsPoolMaxTokens: 3000,
+			reflectionsPoolTargetTokens: 2000,
 			agentMaxTurns: 16,
 			showWorkerNotifications: true,
 			passive: false,
@@ -59,6 +61,8 @@ describe("V3 config", () => {
 				compactAfterTokens: 30,
 				observationsPoolMaxTokens: 40,
 				observationsPoolTargetTokens: 15,
+				reflectionsPoolMaxTokens: 60,
+				reflectionsPoolTargetTokens: 40,
 				agentMaxTurns: 5,
 				model: { provider: "anthropic", id: "global", thinking: "medium" },
 				showWorkerNotifications: true,
@@ -80,6 +84,8 @@ describe("V3 config", () => {
 			compactAfterTokens: 30,
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 15,
+			reflectionsPoolMaxTokens: 60,
+			reflectionsPoolTargetTokens: 40,
 			agentMaxTurns: 5,
 			model: { provider: "openai", id: "project", thinking: "low" },
 			showWorkerNotifications: false,
@@ -110,6 +116,7 @@ describe("V3 config", () => {
 					thinkingByWorker: {
 						observer: "minimal",
 						reflector: "high",
+						consolidator: "max",
 						dropper: "invalid",
 						unknown: "max",
 					},
@@ -122,10 +129,11 @@ describe("V3 config", () => {
 			provider: "openai",
 			id: "gpt-5.6-luna",
 			thinking: "low",
-			thinkingByWorker: { observer: "minimal", reflector: "high" },
+			thinkingByWorker: { observer: "minimal", reflector: "high", consolidator: "max" },
 		});
 		expect(resolveWorkerThinkingLevel(config, "observer")).toBe("minimal");
 		expect(resolveWorkerThinkingLevel(config, "reflector")).toBe("high");
+		expect(resolveWorkerThinkingLevel(config, "consolidator")).toBe("max");
 		expect(resolveWorkerThinkingLevel(config, "dropper")).toBe("low");
 	});
 
@@ -202,6 +210,43 @@ describe("V3 config", () => {
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "on" })).toEqual({ passive: true });
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "0" })).toEqual({ passive: false });
 		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_PASSIVE: "maybe" })).toEqual({});
+	});
+
+	describe("reflection pool validation", () => {
+		it("accepts a max of two or more and derives two thirds", () => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": { reflectionsPoolMaxTokens: 30 },
+			});
+
+			expect(loadConfig(cwd, {})).toMatchObject({
+				reflectionsPoolMaxTokens: 30,
+				reflectionsPoolTargetTokens: 20,
+			});
+		});
+
+		it("rejects max below two and targets at or above max", () => {
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": {
+					reflectionsPoolMaxTokens: 1,
+					reflectionsPoolTargetTokens: 2_000,
+				},
+			});
+			expect(loadConfig(cwd, {})).toMatchObject({
+				reflectionsPoolMaxTokens: 3_000,
+				reflectionsPoolTargetTokens: 2_000,
+			});
+
+			writeJson(join(cwd, ".pi", "settings.json"), {
+				"observational-memory": {
+					reflectionsPoolMaxTokens: 30,
+					reflectionsPoolTargetTokens: 30,
+				},
+			});
+			expect(loadConfig(cwd, {})).toMatchObject({
+				reflectionsPoolMaxTokens: 30,
+				reflectionsPoolTargetTokens: 20,
+			});
+		});
 	});
 
 	describe("compactAfterTokens ratio mode", () => {

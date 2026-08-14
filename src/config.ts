@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export type MemoryWorker = "observer" | "reflector" | "dropper";
+export type MemoryWorker = "observer" | "reflector" | "consolidator" | "dropper";
 
 export interface ConfiguredModel {
 	provider: string;
@@ -47,6 +47,8 @@ export interface Config {
 	compactAfterTokensRatio: number;
 	observationsPoolMaxTokens: number;
 	observationsPoolTargetTokens: number;
+	reflectionsPoolMaxTokens: number;
+	reflectionsPoolTargetTokens: number;
 	agentMaxTurns: number;
 	model?: ConfiguredModel;
 	showWorkerNotifications: boolean;
@@ -62,6 +64,8 @@ export const DEFAULTS: Config = {
 	compactAfterTokensRatio: 0.68,
 	observationsPoolMaxTokens: 20_000,
 	observationsPoolTargetTokens: 10_000,
+	reflectionsPoolMaxTokens: 3_000,
+	reflectionsPoolTargetTokens: 2_000,
 	agentMaxTurns: 16,
 	showWorkerNotifications: true,
 	passive: false,
@@ -88,7 +92,7 @@ export function resolveCompactAfterTokens(config: Config, contextWindow: number 
 }
 
 export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export const MEMORY_WORKER_VALUES: readonly MemoryWorker[] = ["observer", "reflector", "dropper"] as const;
+export const MEMORY_WORKER_VALUES: readonly MemoryWorker[] = ["observer", "reflector", "consolidator", "dropper"] as const;
 
 export function resolveWorkerThinkingLevel(config: Config, worker: MemoryWorker): ModelThinkingLevel {
 	return config.model?.thinkingByWorker?.[worker] ?? config.model?.thinking ?? "low";
@@ -152,6 +156,10 @@ function derivedObservationPoolTarget(maxTokens: number): number {
 	return Math.floor(maxTokens / 2);
 }
 
+function derivedReflectionPoolTarget(maxTokens: number): number {
+	return Math.floor(maxTokens * 2 / 3);
+}
+
 function isThinkingLevel(value: unknown): value is ModelThinkingLevel {
 	return typeof value === "string" && (THINKING_LEVEL_VALUES as readonly string[]).includes(value);
 }
@@ -204,11 +212,16 @@ function normalizeSettingsConfig(value: Record<string, unknown>): Partial<Config
 		"compactAfterTokens",
 		"observationsPoolMaxTokens",
 		"observationsPoolTargetTokens",
+		"reflectionsPoolTargetTokens",
 		"agentMaxTurns",
 	] as const;
 	for (const key of numberKeys) {
 		const normalizedValue = positiveIntegerOrUndefined(value[key]);
 		if (normalizedValue !== undefined) normalized[key] = normalizedValue;
+	}
+	const reflectionsPoolMaxTokens = positiveIntegerOrUndefined(value.reflectionsPoolMaxTokens);
+	if (reflectionsPoolMaxTokens !== undefined && reflectionsPoolMaxTokens >= 2) {
+		normalized.reflectionsPoolMaxTokens = reflectionsPoolMaxTokens;
 	}
 	if (isCompactAfterTokensMode(value.compactAfterTokensMode)) {
 		normalized.compactAfterTokensMode = value.compactAfterTokensMode;
@@ -252,6 +265,7 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): C
 	const merged = {
 		...DEFAULTS,
 		observationsPoolTargetTokens: undefined,
+		reflectionsPoolTargetTokens: undefined,
 		...globalConfig,
 		...projectConfig,
 		...envConfig,
@@ -260,9 +274,14 @@ export function loadConfig(cwd: string, env: NodeJS.ProcessEnv = process.env): C
 		merged.observationsPoolTargetTokens,
 		merged.observationsPoolMaxTokens,
 	) ?? derivedObservationPoolTarget(merged.observationsPoolMaxTokens);
+	const reflectionsTarget = validTargetOrUndefined(
+		merged.reflectionsPoolTargetTokens,
+		merged.reflectionsPoolMaxTokens,
+	) ?? derivedReflectionPoolTarget(merged.reflectionsPoolMaxTokens);
 
 	return {
 		...merged,
 		observationsPoolTargetTokens: target,
+		reflectionsPoolTargetTokens: reflectionsTarget,
 	};
 }

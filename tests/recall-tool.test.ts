@@ -96,6 +96,43 @@ describe("V3 recall tool", () => {
 		expect(text).toContain("I like tea.");
 	});
 
+	it("preserves reflection status and direct/transitive lineage in details, text, and TUI", async () => {
+		const obs = observation("aaaaaaaaaaaa", { content: "User likes tea.", sourceEntryIds: ["raw-1"] });
+		const original = reflection("eeeeeeeeeeee", [obs.id], { content: "User likes tea." });
+		const middle = reflection("ffffffffffff", [obs.id], { content: "User likes tea and coffee." });
+		const head = reflection("111111111111", [obs.id], { content: "User prefers tea beverages." });
+		const entries = [
+			rawMessage("raw-1", "I like tea."),
+			observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "raw-1" }),
+			reflectionsRecordedEntry("om-original", { reflections: [original], coversUpToId: "raw-1" }),
+			{
+				type: "custom", id: "om-middle", customType: "om.reflections.consolidated",
+				data: { entries: [{ replacement: middle, supersededReflectionIds: [original.id] }], coversUpToId: "raw-1" },
+			},
+			{
+				type: "custom", id: "om-head", customType: "om.reflections.consolidated",
+				data: { entries: [{ replacement: head, supersededReflectionIds: [middle.id] }], coversUpToId: "raw-1" },
+			},
+		];
+
+		const originalRecall = await execute(original.id, entries as TestEntry[]);
+		const headRecall = await execute(head.id, entries as TestEntry[]);
+		expect(originalRecall.result.details?.reflections[0]).toMatchObject({
+			status: "superseded",
+			directlySupersededByReflectionIds: [middle.id],
+			supersededByReflectionIds: [middle.id, head.id],
+		});
+		expect(originalRecall.text).toContain("[superseded]");
+		expect(originalRecall.text).toContain(`superseded by through lineage: ${middle.id}, ${head.id}`);
+		expect(formatRecallRenderedResultForTui(originalRecall.result as any, false)).toContain("superseded");
+		expect(headRecall.result.details?.reflections[0]).toMatchObject({
+			status: "active",
+			directlySupersedesReflectionIds: [middle.id],
+			supersedesReflectionIds: [middle.id, original.id],
+		});
+		expect(formatRecallRenderedResultForTui(headRecall.result as any, false)).toContain(`lineage ${middle.id}, ${original.id}`);
+	});
+
 	it("reports missing sources as partial", async () => {
 		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["missing-raw"] });
 		const entries = [observationsRecordedEntry("om-obs", { observations: [obs], coversUpToId: "om-obs" })];

@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { runConsolidator } from "../agents/consolidator/agent.js";
+import { reflectionPoolFingerprint, reflectionPoolMetrics } from "../agents/consolidator/pool.js";
 import { runDropper } from "../agents/dropper/agent.js";
 import { observationPoolMetrics } from "../agents/dropper/pool.js";
 import { ObserverStreamError, runObserver } from "../agents/observer/agent.js";
@@ -10,9 +12,11 @@ import { serializeSourceAddressedBranchEntries } from "../serialize.js";
 import {
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
+	buildReflectionsConsolidatedData,
 	buildReflectionsRecordedData,
 	earlierCoverageMarkerId,
 	foldLedger,
@@ -44,6 +48,7 @@ type ConsolidationCtx = {
 		getBranch: () => unknown;
 		getSessionId?: () => string;
 		getSessionFile?: () => string | undefined;
+		getLeafId?: () => string | null | undefined;
 	};
 };
 
@@ -55,23 +60,14 @@ type ReflectorStageResult = {
 	effectiveReflectionCoverageId?: string;
 };
 
+type WorkerStage = "observer" | "reflector" | "consolidator" | "dropper";
+
 function sourceEntriesAfter(entries: Entry[], index: number): Entry[] {
 	return entries.slice(index + 1).filter(isSourceEntry);
 }
 
 function appendEntry(pi: ExtensionAPI, customType: string, data: unknown): void {
 	pi.appendEntry(customType, data);
-}
-
-function mergeReflections(existing: Reflection[], additional: Reflection[]): Reflection[] {
-	const seen = new Set(existing.map((reflection) => reflection.id));
-	const merged = [...existing];
-	for (const reflection of additional) {
-		if (seen.has(reflection.id)) continue;
-		seen.add(reflection.id);
-		merged.push(reflection);
-	}
-	return merged;
 }
 
 /**
@@ -104,16 +100,27 @@ function stageDue(
 	return rawEstimateFn(entries) >= threshold;
 }
 
+function reflectionConsolidationDue(entries: Entry[], runtime: Runtime): boolean {
+	const folded = foldLedger(entries);
+	const metrics = reflectionPoolMetrics(
+		folded.activeReflections,
+		runtime.config.reflectionsPoolTargetTokens,
+		runtime.config.reflectionsPoolMaxTokens,
+	);
+	return metrics.overMax && reflectionPoolFingerprint(folded.activeReflections) !== runtime.consolidatorCooldownFingerprint;
+}
+
 function anyStageDue(entries: Entry[], runtime: Runtime, currentTokens: number | undefined): boolean {
 	return stageDue(entries, runtime, currentTokens, OM_OBSERVATIONS_RECORDED, rawTokensSinceObservationCoverage, runtime.config.observeAfterTokens)
-		|| stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, rawTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens);
+		|| stageDue(entries, runtime, currentTokens, OM_REFLECTIONS_RECORDED, rawTokensSinceReflectionCoverage, runtime.config.reflectAfterTokens)
+		|| reflectionConsolidationDue(entries, runtime);
 }
 
 function shouldNotifyWorker(runtime: Runtime, ctx: ConsolidationCtx): boolean {
 	return runtime.config.showWorkerNotifications && ctx.hasUI;
 }
 
-function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: "observer" | "reflector" | "dropper") => Promise<ResolvedModel | undefined> {
+function makeModelResolver(runtime: Runtime, ctx: ConsolidationCtx): (stage: WorkerStage) => Promise<ResolvedModel | undefined> {
 	let cached: ResolveResult | undefined;
 	return async (stage) => {
 		cached ??= await runtime.resolveModel({
@@ -154,12 +161,40 @@ function debugSessionMetadata(ctx: ConsolidationCtx): { sessionId?: string; sess
 	}
 }
 
+type ConsolidatorCooldownIdentity = { sessionIdentity: string; branchIdentity: string };
+
+function consolidatorCooldownIdentity(ctx: ConsolidationCtx, entries: Entry[]): ConsolidatorCooldownIdentity {
+	const metadata = debugSessionMetadata(ctx);
+	return {
+		sessionIdentity: metadata.sessionId ?? metadata.sessionFile ?? ctx.cwd,
+		branchIdentity: ctx.sessionManager.getLeafId?.() ?? entries.at(-1)?.id ?? "(empty-branch)",
+	};
+}
+
+function clearConsolidatorCooldownIfIdentityChanged(
+	runtime: Runtime,
+	identity: ConsolidatorCooldownIdentity,
+	entries: Entry[],
+): void {
+	const stored = runtime.consolidatorCooldownIdentity;
+	const storedBranchStillPresent = stored !== undefined
+		&& entries.some((entry) => entry.id === stored.branchIdentity);
+	if (
+		runtime.consolidatorCooldownFingerprint !== undefined &&
+		(!stored || stored.sessionIdentity !== identity.sessionIdentity || !storedBranchStillPresent)
+	) {
+		runtime.consolidatorCooldownFingerprint = undefined;
+		runtime.consolidatorCooldownIdentity = undefined;
+	}
+}
+
 function maybeLaunchConsolidation(pi: ExtensionAPI, runtime: Runtime, ctx: ConsolidationCtx): void {
 	runtime.ensureConfig(ctx.cwd);
 	if (runtime.config.passive === true) return;
 	if (runtime.consolidationInFlight) return;
 
 	const entries = ctx.sessionManager.getBranch() as Entry[];
+	clearConsolidatorCooldownIfIdentityChanged(runtime, consolidatorCooldownIdentity(ctx, entries), entries);
 	if (!anyStageDue(entries, runtime, realContextTokens(ctx))) return;
 
 	const runId = `consolidation-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
@@ -207,6 +242,15 @@ export async function runConsolidationPipeline(
 		if (reflectorResult.outcome === "abort") return;
 	} catch (error) {
 		debugLog("reflector.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "reflector", error) });
+		return;
+	}
+
+	runtime.consolidationPhase = "consolidator";
+	try {
+		const consolidatorOutcome = await runConsolidatorStage(pi, runtime, ctx, resolveModel);
+		if (consolidatorOutcome === "abort") return;
+	} catch (error) {
+		debugLog("consolidator.error", { errorMessage: runtime.recordConsolidationStageError(ctx, "consolidator", error) });
 		return;
 	}
 
@@ -383,7 +427,8 @@ async function runReflectorStage(
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
-		reflections: folded.reflections,
+		reflections: folded.activeReflections,
+		historicalReflectionIds: [...folded.reflectionsById.keys()],
 		observations: folded.activeObservations,
 		maxTurns: runtime.config.agentMaxTurns,
 		thinkingLevel: resolveWorkerThinkingLevel(runtime.config, "reflector"),
@@ -400,11 +445,90 @@ async function runReflectorStage(
 	};
 }
 
+async function runConsolidatorStage(
+	pi: ExtensionAPI,
+	runtime: Runtime,
+	ctx: ConsolidationCtx,
+	resolveModel: (stage: WorkerStage) => Promise<ResolvedModel | undefined>,
+): Promise<StageOutcome> {
+	const entries = ctx.sessionManager.getBranch() as Entry[];
+	const folded = foldLedger(entries);
+	const metrics = reflectionPoolMetrics(
+		folded.activeReflections,
+		runtime.config.reflectionsPoolTargetTokens,
+		runtime.config.reflectionsPoolMaxTokens,
+	);
+	if (!metrics.overMax) return "continue";
+
+	const fingerprint = reflectionPoolFingerprint(folded.activeReflections);
+	const cooldownIdentity = consolidatorCooldownIdentity(ctx, entries);
+	clearConsolidatorCooldownIfIdentityChanged(runtime, cooldownIdentity, entries);
+	if (fingerprint === runtime.consolidatorCooldownFingerprint) {
+		debugLog("consolidator.cooldown", { fingerprint, reflectionTokens: metrics.reflectionTokens });
+		return "continue";
+	}
+
+	const coversUpToId = latestCoverageMarkerId(entries, OM_REFLECTIONS_RECORDED);
+	if (!coversUpToId) return "continue";
+	debugLog("consolidator.stage_start", {
+		fingerprint,
+		reflectionTokens: metrics.reflectionTokens,
+		targetTokens: metrics.targetTokens,
+		maxTokens: metrics.maxTokens,
+		activeReflectionCount: metrics.activeReflectionCount,
+		coversUpToId,
+	});
+
+	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
+		`Observational memory: consolidator running — active reflection pool ~${metrics.reflectionTokens.toLocaleString()} / ${metrics.targetTokens.toLocaleString()} target tokens`,
+		"info",
+	);
+	const resolved = await resolveModel("consolidator");
+	if (!resolved) return "abort";
+
+	const consolidations = await runConsolidator({
+		model: resolved.model as any,
+		apiKey: resolved.apiKey,
+		headers: resolved.headers,
+		reflections: folded.activeReflections,
+		historicalReflectionIds: [...folded.reflectionsById.keys()],
+		targetTokens: runtime.config.reflectionsPoolTargetTokens,
+		maxTurns: runtime.config.agentMaxTurns,
+		thinkingLevel: resolveWorkerThinkingLevel(runtime.config, "consolidator"),
+	});
+	if (!consolidations || consolidations.length === 0) {
+		runtime.consolidatorCooldownFingerprint = fingerprint;
+		runtime.consolidatorCooldownIdentity = cooldownIdentity;
+		debugLog("consolidator.empty", { fingerprint });
+		if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
+			"Observational memory: consolidator found no safe reductions (pool unchanged; will retry after it changes)",
+			"info",
+		);
+		return "continue";
+	}
+
+	const data = buildReflectionsConsolidatedData(consolidations, coversUpToId);
+	if (!data) return "continue";
+	appendEntry(pi, OM_REFLECTIONS_CONSOLIDATED, data);
+	runtime.consolidatorCooldownFingerprint = undefined;
+	runtime.consolidatorCooldownIdentity = undefined;
+	debugLog("consolidator.appended", {
+		entryCount: consolidations.length,
+		coversUpToId,
+		fingerprint,
+	});
+	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
+		`Observational memory: ${consolidations.length} reflection consolidation${consolidations.length === 1 ? "" : "s"} recorded`,
+		"info",
+	);
+	return "continue";
+}
+
 async function runDropperStage(
 	pi: ExtensionAPI,
 	runtime: Runtime,
 	ctx: ConsolidationCtx,
-	resolveModel: (stage: "dropper") => Promise<ResolvedModel | undefined>,
+	resolveModel: (stage: WorkerStage) => Promise<ResolvedModel | undefined>,
 	sameRunReflections: Reflection[],
 	sameRunReflectionCoverageId: string | undefined,
 ): Promise<StageOutcome> {
@@ -450,12 +574,11 @@ async function runDropperStage(
 	const resolved = await resolveModel("dropper");
 	if (!resolved) return "abort";
 
-	const reflectionsForDropper = mergeReflections(folded.reflections, sameRunReflections);
 	const droppedIds = await runDropper({
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,
 		headers: resolved.headers,
-		reflections: reflectionsForDropper,
+		reflections: folded.activeReflections,
 		observations: folded.activeObservations,
 		targetTokens: runtime.config.observationsPoolTargetTokens,
 		maxTurns: runtime.config.agentMaxTurns,

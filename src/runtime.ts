@@ -23,7 +23,7 @@ function hasUsableAuth(auth: { apiKey?: unknown; headers?: unknown }): boolean {
 
 type NotifyLevel = "warning" | "info" | "error";
 type Notify = (message: string, type?: NotifyLevel) => void;
-export type ConsolidationPhase = "observer" | "reflector" | "dropper";
+export type ConsolidationPhase = "observer" | "reflector" | "consolidator" | "dropper";
 
 export interface ResolveCtx {
 	model: unknown;
@@ -48,7 +48,10 @@ export class Runtime {
 	resolveFailureNotified = false;
 	lastObserverError: string | undefined;
 	lastReflectorError: string | undefined;
+	lastConsolidatorError: string | undefined;
 	lastDropperError: string | undefined;
+	consolidatorCooldownFingerprint: string | undefined;
+	consolidatorCooldownIdentity: { sessionIdentity: string; branchIdentity: string } | undefined;
 	/** Deliberate-empty backoff (#23): skip observer re-fires over the same span until enough new tokens arrive. */
 	observerEmptyBackoff: {
 		sessionIdentity: string | undefined;
@@ -93,6 +96,7 @@ export class Runtime {
 		this.consolidationPhase = undefined;
 		this.lastObserverError = undefined;
 		this.lastReflectorError = undefined;
+		this.lastConsolidatorError = undefined;
 		this.lastDropperError = undefined;
 		const promise = this.launchTrackedTask(ctx, "consolidation", work, () => {
 			this.consolidationInFlight = false;
@@ -107,6 +111,7 @@ export class Runtime {
 		const message = error instanceof Error ? error.message : String(error);
 		if (phase === "observer") this.lastObserverError = message;
 		if (phase === "reflector") this.lastReflectorError = message;
+		if (phase === "consolidator") this.lastConsolidatorError = message;
 		if (phase === "dropper") this.lastDropperError = message;
 		if (ctx.hasUI && ctx.ui) ctx.ui.notify(`Observational memory: ${phase} failed: ${message}`, "warning");
 		return message;

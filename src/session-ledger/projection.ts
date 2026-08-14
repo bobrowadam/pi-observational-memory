@@ -1,8 +1,10 @@
 import {
 	OM_FOLDED,
+	isApplicableReflectionsConsolidatedData,
 	isMemoryDetails,
 	isObservationsDroppedEntry,
 	isObservationsRecordedEntry,
+	isReflectionsConsolidatedEntry,
 	isReflectionsRecordedEntry,
 	type Entry,
 	type MemoryDetails,
@@ -18,6 +20,7 @@ export type Projection = {
 export type ProjectionDiff = {
 	observationsOnlyInFull: Observation[];
 	reflectionsOnlyInFull: Reflection[];
+	reflectionsOnlyInVisible: Reflection[];
 	droppedOnlyInFull: Observation[];
 };
 
@@ -89,8 +92,9 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 	const observations: Observation[] = [];
 	const reflections: Reflection[] = [];
 	const observationsById = new Set<string>();
-	const reflectionsById = new Set<string>();
+	const reflectionsById = new Map<string, Reflection>();
 	const droppedObservationIds = new Set<string>();
+	const supersededReflectionIds = new Set<string>();
 
 	for (const entry of entries) {
 		if (isObservationsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, observationsBoundary)) {
@@ -105,8 +109,20 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 		if (isReflectionsRecordedEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary)) {
 			for (const reflection of entry.data.reflections) {
 				if (reflectionsById.has(reflection.id)) continue;
-				reflectionsById.add(reflection.id);
+				reflectionsById.set(reflection.id, reflection);
 				reflections.push(reflection);
+			}
+			continue;
+		}
+
+		if (isReflectionsConsolidatedEntry(entry) && isCoveredAtOrBefore(entry, indexes, reflectionsBoundary)) {
+			if (!isApplicableReflectionsConsolidatedData(entry.data, reflectionsById, supersededReflectionIds)) continue;
+			for (const consolidation of entry.data.entries) {
+				reflectionsById.set(consolidation.replacement.id, consolidation.replacement);
+				reflections.push(consolidation.replacement);
+				for (const reflectionId of consolidation.supersededReflectionIds) {
+					supersededReflectionIds.add(reflectionId);
+				}
 			}
 			continue;
 		}
@@ -118,7 +134,7 @@ function foldProjection(entries: Entry[], options: ProjectionFoldOptions): Proje
 
 	return {
 		observations: observations.filter((observation) => !droppedObservationIds.has(observation.id)),
-		reflections,
+		reflections: reflections.filter((reflection) => !supersededReflectionIds.has(reflection.id)),
 	};
 }
 
@@ -211,10 +227,12 @@ export function diffProjection(visible: Projection, full: Projection): Projectio
 	const visibleObservationIds = new Set(visible.observations.map((observation) => observation.id));
 	const fullObservationIds = new Set(full.observations.map((observation) => observation.id));
 	const visibleReflectionIds = new Set(visible.reflections.map((reflection) => reflection.id));
+	const fullReflectionIds = new Set(full.reflections.map((reflection) => reflection.id));
 
 	return {
 		observationsOnlyInFull: full.observations.filter((observation) => !visibleObservationIds.has(observation.id)),
 		reflectionsOnlyInFull: full.reflections.filter((reflection) => !visibleReflectionIds.has(reflection.id)),
+		reflectionsOnlyInVisible: visible.reflections.filter((reflection) => !fullReflectionIds.has(reflection.id)),
 		droppedOnlyInFull: visible.observations.filter((observation) => !fullObservationIds.has(observation.id)),
 	};
 }

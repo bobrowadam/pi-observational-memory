@@ -1,5 +1,6 @@
 export const OM_OBSERVATIONS_RECORDED = "om.observations.recorded";
 export const OM_REFLECTIONS_RECORDED = "om.reflections.recorded";
+export const OM_REFLECTIONS_CONSOLIDATED = "om.reflections.consolidated";
 export const OM_OBSERVATIONS_DROPPED = "om.observations.dropped";
 export const OM_FOLDED = "om.folded";
 
@@ -48,6 +49,16 @@ export type ReflectionsRecordedEntryData = {
 	coversUpToId: string;
 };
 
+export type ReflectionConsolidation = {
+	replacement: Reflection;
+	supersededReflectionIds: string[];
+};
+
+export type ReflectionsConsolidatedEntryData = {
+	entries: ReflectionConsolidation[];
+	coversUpToId: string;
+};
+
 export type ObservationsDroppedEntryData = {
 	observationIds: string[];
 	coversUpToId: string;
@@ -64,6 +75,7 @@ export type MemoryDetails = {
 export type V3MemoryCustomType =
 	| typeof OM_OBSERVATIONS_RECORDED
 	| typeof OM_REFLECTIONS_RECORDED
+	| typeof OM_REFLECTIONS_CONSOLIDATED
 	| typeof OM_OBSERVATIONS_DROPPED;
 
 export function isRelevance(value: unknown): value is Relevance {
@@ -133,6 +145,51 @@ export function isReflectionsRecordedData(value: unknown): value is ReflectionsR
 	);
 }
 
+export function isReflectionConsolidation(value: unknown): value is ReflectionConsolidation {
+	if (!isPlainRecord(value)) return false;
+	return (
+		isReflection(value.replacement) &&
+		isNonEmptyStringArray(value.supersededReflectionIds) &&
+		value.supersededReflectionIds.every(isMemoryId) &&
+		new Set(value.supersededReflectionIds).size === value.supersededReflectionIds.length &&
+		!value.supersededReflectionIds.includes(value.replacement.id)
+	);
+}
+
+export function isReflectionsConsolidatedData(value: unknown): value is ReflectionsConsolidatedEntryData {
+	if (!isPlainRecord(value) || !Array.isArray(value.entries) || value.entries.length === 0) return false;
+	if (!value.entries.every(isReflectionConsolidation) || !isNonEmptyString(value.coversUpToId)) return false;
+	const replacementIds = new Set<string>();
+	const supersededIds = new Set<string>();
+	for (const entry of value.entries) {
+		if (replacementIds.has(entry.replacement.id)) return false;
+		replacementIds.add(entry.replacement.id);
+		for (const id of entry.supersededReflectionIds) {
+			if (supersededIds.has(id)) return false;
+			supersededIds.add(id);
+		}
+	}
+	return Array.from(replacementIds).every((id) => !supersededIds.has(id));
+}
+
+/**
+ * Check whether a structurally valid consolidation event can be applied to the
+ * current reflection state. The whole event is accepted or rejected together.
+ */
+export function isApplicableReflectionsConsolidatedData(
+	data: ReflectionsConsolidatedEntryData,
+	reflectionsById: ReadonlyMap<string, Reflection>,
+	supersededReflectionIds: ReadonlySet<string>,
+): boolean {
+	for (const consolidation of data.entries) {
+		if (reflectionsById.has(consolidation.replacement.id)) return false;
+		for (const id of consolidation.supersededReflectionIds) {
+			if (!reflectionsById.has(id) || supersededReflectionIds.has(id)) return false;
+		}
+	}
+	return true;
+}
+
 export function isObservationsDroppedData(value: unknown): value is ObservationsDroppedEntryData {
 	if (!isPlainRecord(value)) return false;
 	return isNonEmptyStringArray(value.observationIds) && isNonEmptyString(value.coversUpToId);
@@ -167,6 +224,14 @@ export function isReflectionsRecordedEntry(entry: Entry): entry is Entry & {
 	return entry.type === "custom" && entry.customType === OM_REFLECTIONS_RECORDED && isReflectionsRecordedData(entry.data);
 }
 
+export function isReflectionsConsolidatedEntry(entry: Entry): entry is Entry & {
+	type: "custom";
+	customType: typeof OM_REFLECTIONS_CONSOLIDATED;
+	data: ReflectionsConsolidatedEntryData;
+} {
+	return entry.type === "custom" && entry.customType === OM_REFLECTIONS_CONSOLIDATED && isReflectionsConsolidatedData(entry.data);
+}
+
 export function isObservationsDroppedEntry(entry: Entry): entry is Entry & {
 	type: "custom";
 	customType: typeof OM_OBSERVATIONS_DROPPED;
@@ -189,6 +254,14 @@ export function buildReflectionsRecordedData(
 ): ReflectionsRecordedEntryData | undefined {
 	if (reflections.length === 0 || !isNonEmptyString(coversUpToId)) return undefined;
 	return { reflections, coversUpToId };
+}
+
+export function buildReflectionsConsolidatedData(
+	entries: ReflectionConsolidation[],
+	coversUpToId: string,
+): ReflectionsConsolidatedEntryData | undefined {
+	const data = { entries, coversUpToId };
+	return isReflectionsConsolidatedData(data) ? data : undefined;
 }
 
 export function buildObservationsDroppedData(

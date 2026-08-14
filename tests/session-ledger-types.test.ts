@@ -4,9 +4,11 @@ import {
 	OM_FOLDED,
 	OM_OBSERVATIONS_DROPPED,
 	OM_OBSERVATIONS_RECORDED,
+	OM_REFLECTIONS_CONSOLIDATED,
 	OM_REFLECTIONS_RECORDED,
 	buildObservationsDroppedData,
 	buildObservationsRecordedData,
+	buildReflectionsConsolidatedData,
 	buildReflectionsRecordedData,
 	isMemoryDetails,
 	isObservationsDroppedData,
@@ -15,6 +17,8 @@ import {
 	isObservationsRecordedEntry,
 	isObservation,
 	isReflection,
+	isReflectionsConsolidatedData,
+	isReflectionsConsolidatedEntry,
 	isReflectionsRecordedData,
 	isReflectionsRecordedEntry,
 } from "../src/session-ledger/index.js";
@@ -26,6 +30,7 @@ import {
 	oldV2CompactionDetails,
 	oldV2ObservationEntry,
 	reflection,
+	reflectionsConsolidatedEntry,
 	reflectionsRecordedEntry,
 } from "./fixtures/session.js";
 
@@ -33,6 +38,7 @@ describe("session-ledger V3 type guards and builders", () => {
 	it("exports the V3 custom type constants", () => {
 		expect(OM_OBSERVATIONS_RECORDED).toBe("om.observations.recorded");
 		expect(OM_REFLECTIONS_RECORDED).toBe("om.reflections.recorded");
+		expect(OM_REFLECTIONS_CONSOLIDATED).toBe("om.reflections.consolidated");
 		expect(OM_OBSERVATIONS_DROPPED).toBe("om.observations.dropped");
 		expect(OM_FOLDED).toBe("om.folded");
 	});
@@ -83,6 +89,30 @@ describe("session-ledger V3 type guards and builders", () => {
 			observationIds: ["aaaaaaaaaaaa"],
 			coversUpToId: "ref-entry-1",
 		});
+	});
+
+	it("validates atomic reflection consolidation events", () => {
+		const replacement = reflection("111111111111", ["aaaaaaaaaaaa"]);
+		const valid = {
+			entries: [{ replacement, supersededReflectionIds: ["eeeeeeeeeeee", "ffffffffffff"] }],
+			coversUpToId: "raw-1",
+		};
+
+		expect(isReflectionsConsolidatedData(valid)).toBe(true);
+		expect(buildReflectionsConsolidatedData(valid.entries, "raw-1")).toEqual(valid);
+		expect(isReflectionsConsolidatedEntry(reflectionsConsolidatedEntry("om-consolidated", valid))).toBe(true);
+		expect(isReflectionsConsolidatedData({ ...valid, entries: [] })).toBe(false);
+		expect(isReflectionsConsolidatedData({
+			...valid,
+			entries: [
+				{ replacement, supersededReflectionIds: ["eeeeeeeeeeee"] },
+				{ replacement: reflection("222222222222"), supersededReflectionIds: ["eeeeeeeeeeee"] },
+			],
+		})).toBe(false);
+		expect(isReflectionsConsolidatedData({
+			...valid,
+			entries: [{ replacement, supersededReflectionIds: [replacement.id] }],
+		})).toBe(false);
 	});
 
 	it("recognizes V3 memory entries", () => {

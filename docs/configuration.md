@@ -35,12 +35,14 @@ The extension loads config once for its runtime. After changing settings, restar
     "compactAfterTokens": 81000,
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
+    "reflectionsPoolMaxTokens": 3000,
+    "reflectionsPoolTargetTokens": 2000,
     "agentMaxTurns": 16,
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
       "thinking": "low",
-      "thinkingByWorker": { "reflector": "high" }
+      "thinkingByWorker": { "reflector": "high", "consolidator": "max" }
     },
     "showWorkerNotifications": true,
     "passive": false,
@@ -61,19 +63,21 @@ You can omit everything. Defaults work for ordinary sessions, and if `model` is 
 | `compactAfterTokens` | positive integer | `81000` | Estimated source-entry threshold for proactive auto-compaction, counted after the latest compaction boundary. |
 | `observationsPoolMaxTokens` | positive integer | `20000` | Normal compaction-projection observation-token pressure that makes compaction do a full fold. |
 | `observationsPoolTargetTokens` | positive integer below max | half of `observationsPoolMaxTokens` | Folded active observation target used by post-reflection dropper maintenance. |
-| `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, and dropper. |
-| `model` | object | unset | Optional model override for observer, reflector, and dropper. |
+| `reflectionsPoolMaxTokens` | positive integer ≥ 2 | `3000` | Soft trigger threshold for active reflection-pool consolidation; consolidation is due strictly above it. |
+| `reflectionsPoolTargetTokens` | positive integer below reflection max | two thirds of `reflectionsPoolMaxTokens` | Active reflection target the consolidator works toward. |
+| `agentMaxTurns` | positive integer | `16` | Shared nested-agent turn cap for observer, reflector, consolidator, and dropper. |
+| `model` | object | unset | Optional model override for observer, reflector, consolidator, and dropper. |
 | `model.provider` | string | unset | Provider name in Pi's model registry. Required when `model` is set. |
 | `model.id` | string | unset | Model id in Pi's model registry. Required when `model` is set. |
 | `model.thinking` | enum | unset; workers fall back to `low` | Shared reasoning/thinking level for memory workers. |
-| `model.thinkingByWorker` | object | unset | Optional `observer`, `reflector`, and `dropper` overrides; each value uses the thinking enum. |
-| `showWorkerNotifications` | boolean | `true` | Shows routine observer, reflector, and dropper progress notifications. |
+| `model.thinkingByWorker` | object | unset | Optional `observer`, `reflector`, `consolidator`, and `dropper` overrides; each value uses the thinking enum. |
+| `showWorkerNotifications` | boolean | `true` | Shows routine observer, reflector, consolidator, and dropper progress notifications. |
 | `passive` | boolean | `false` | Disables proactive background memory and auto-compaction triggers. |
 | `debugLog` | boolean | `false` | Writes best-effort per-session extension debug events to Pi's agent directory. |
 
 Valid thinking values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A valid `model.thinkingByWorker` value takes precedence for that worker; otherwise it uses `model.thinking`, then `low`.
 
-Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. `observationsPoolTargetTokens` must also be below `observationsPoolMaxTokens`; if omitted or invalid, it is derived as `Math.floor(observationsPoolMaxTokens / 2)`.
+Invalid values are ignored. Positive-integer settings must be finite integers greater than zero. Observation and reflection targets must be below their corresponding max; if omitted or invalid, they are derived as `Math.floor(observationsPoolMaxTokens / 2)` and `Math.floor(reflectionsPoolMaxTokens * 2 / 3)` respectively.
 
 ## `observeAfterTokens`
 
@@ -101,13 +105,21 @@ The dropper no longer uses `reflectAfterTokens` as its own launch threshold. Dro
 
 Lower values distill reflections more often and therefore create more opportunities for post-reflection dropper maintenance. Higher values reduce reflector model calls but leave more observations between reflection and dropper opportunities.
 
+## Worker pipeline and reflection history
+
+The background memory pipeline is ordered: **observer → reflector → consolidator → dropper**. Each triggered run attempts these stages in order, and later stages continue in the same run using ledger state appended by earlier stages. The observer records source-backed observations; the reflector records durable reflections; the consolidator runs only for an active reflection pool over the soft `reflectionsPoolMaxTokens` trigger; and the dropper runs only after non-empty same-run reflection output and maintains the active observation target. Observer work is attempted first when its source coverage is due, so a successful observer stage can make same-run reflection eligible.
+
+Reflection consolidation is append-only. A consolidation event records a replacement and the active reflection ids it supersedes; it does not edit or delete the earlier records. Folded active projections and consolidator/reflector prompts exclude superseded records, while full ledger history retains them. `recall` accepts either side of the lineage: it marks the old reflection `superseded` and reports replacement ids, or marks the replacement `active` and reports the reflections it supersedes.
+
+If the consolidator finds no safe reduction, cooldown is tied to the unchanged active-reflection fingerprint rather than time. New reflections or an accepted consolidation change the fingerprint and make another attempt eligible.
+
 ## `compactAfterTokens`
 
 Default: `81000`.
 
 The auto-compaction trigger runs from Pi's `agent_end` hook. It counts estimated source-entry tokens after the latest compaction boundary. The count starts at `firstKeptEntryId` when Pi provides that boundary, so retained source entries remain part of the metric. Memory ledger entries and compaction metadata contribute zero. If the count reaches `compactAfterTokens`, the extension defers with `setTimeout(0)`, checks that Pi is idle, re-checks the same metric, and calls `ctx.compact()`. Pi's provider context usage is not used for this threshold.
 
-This trigger does not wait for observer, reflector, or dropper work. Actual compaction summary creation happens later in `session_before_compact`, where V3 compaction is deterministic and model-free.
+This trigger does not wait for observer, reflector, consolidator, or dropper work. Actual compaction summary creation happens later in `session_before_compact`, where V3 compaction is deterministic and model-free.
 
 Pi's own window-pressure compaction and manual compaction can still happen independently of this proactive trigger.
 
@@ -118,6 +130,18 @@ Default: `20000`.
 This controls V3's full-fold pressure. During compaction, the extension builds the normal compaction projection: observations whose `coversUpToId` reaches the compaction boundary, with reflection/drop effects held stable from the latest full fold. If there is no previous full fold, normal compaction includes observations only. If that projection's active observation tokens are at or above `observationsPoolMaxTokens`, compaction performs a full fold through the compaction boundary and applies observations, reflections, and drops by coverage marker. Otherwise, it keeps reflection/drop effects stable from the latest full fold and projects only observations through the new boundary.
 
 This is not the active observation dropper target and not a scheduling threshold for the reflector. Use `observationsPoolTargetTokens` for dropper active observation maintenance and `reflectAfterTokens` for reflector cadence.
+
+## `reflectionsPoolMaxTokens`
+
+Default: `3000`.
+
+This is a soft trigger threshold for the folded active reflection pool, not a hard upper bound. The consolidator is eligible only when active reflection tokens are strictly greater than this max; being at the max does not trigger a model call. A safe no-output run can leave the active pool over max, with the unchanged pool fingerprint cooled down until the pool changes. Superseded reflections do not count toward this active pool, although their records remain in the append-only ledger and remain available to `recall`.
+
+## `reflectionsPoolTargetTokens`
+
+Default: two thirds of `reflectionsPoolMaxTokens`.
+
+When the active reflection pool is over max, the consolidator receives active reflections only and proposes shorter replacements toward this target. It may safely reduce fewer reflections than requested or make no change when consolidation would lose meaning. A no-change run records the current active-pool fingerprint in cooldown, so repeated turns do not retry the same unchanged pool; a changed active pool clears that cooldown.
 
 ## `observationsPoolTargetTokens`
 
@@ -137,7 +161,7 @@ This target does not affect compaction full-fold pressure. Visible compaction pr
 
 Default: `16`.
 
-This is the shared nested-agent turn cap for the observer, reflector, and dropper. A turn is one assistant/model response cycle inside Pi's agent loop. The cap is not a token budget and not a literal tool-call counter.
+This is the shared nested-agent turn cap for the observer, reflector, consolidator, and dropper. A turn is one assistant/model response cycle inside Pi's agent loop. The cap is not a token budget and not a literal tool-call counter.
 
 Use lower values to bound background memory-worker cost. Too low can reduce observation coverage or reflection/drop quality.
 
@@ -145,7 +169,7 @@ Use lower values to bound background memory-worker cost. Too low can reduce obse
 
 Default: unset, meaning memory workers use the session model.
 
-Set `model` when you want the observer, reflector, and dropper to use a cheaper or faster model than the main coding agent:
+Set `model` when you want the observer, reflector, consolidator, and dropper to use a cheaper or faster model than the main coding agent:
 
 ```json
 {
@@ -160,19 +184,19 @@ Set `model` when you want the observer, reflector, and dropper to use a cheaper 
 }
 ```
 
-`provider` and `id` must both be non-empty strings. `thinking` and `thinkingByWorker` are optional. Per-worker values take precedence over the shared thinking level. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. Memory workers accept either an API key or OAuth-style auth headers (e.g. `Authorization: Bearer …`), so OAuth-authenticated providers work without an API key. If no usable model or credentials are available, the relevant background worker skips/fails safely rather than inventing memory.
+`provider` and `id` must both be non-empty strings. `thinking` and `thinkingByWorker` are optional. Per-worker values take precedence over the shared thinking level; this includes a separate consolidator thinking level when reflection reduction benefits from deeper reasoning. If the configured model cannot be resolved, the runtime attempts to fall back to the current session model and notifies once. Memory workers accept either an API key or OAuth-style auth headers (e.g. `Authorization: Bearer …`), so OAuth-authenticated providers work without an API key. If no usable model or credentials are available, the relevant background worker skips/fails safely rather than inventing memory.
 
 ## `showWorkerNotifications`
 
 Default: `true`.
 
-When `false`, the extension hides routine observer, reflector, and dropper progress notifications (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
+When `false`, the extension hides routine observer, reflector, consolidator, and dropper progress notifications (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
 
 ## `passive`
 
 Default: `false`.
 
-When `true`, the extension does not proactively run the observer, reflector/dropper lane, or auto-compaction trigger. Manual/Pi compaction hooks, `/om:status`, `/om:view`, and `recall` remain available.
+When `true`, the extension does not proactively run the observer, reflector/consolidator/dropper lane, or auto-compaction trigger. Manual/Pi compaction hooks, `/om:status`, `/om:view`, and `recall` remain available.
 
 Environment override:
 
@@ -202,7 +226,7 @@ Contexts without a usable session id fall back to the legacy global file:
 observational-memory/debug.ndjson
 ```
 
-Each row includes event metadata such as `sessionId`, `sessionFile`, `runId`, `cwd`, and event-specific `data`. `runId` identifies one consolidation pipeline inside a session file, so you can filter a session log to a single observer/reflector/dropper pass.
+Each row includes event metadata such as `sessionId`, `sessionFile`, `runId`, `cwd`, and event-specific `data`. `runId` identifies one consolidation pipeline inside a session file, so you can filter a session log to a single observer → reflector → consolidator → dropper pass.
 
 Dropper diagnostics are especially useful when the active observation pool is over target but no drops are appended. For example:
 

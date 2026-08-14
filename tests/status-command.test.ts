@@ -32,6 +32,8 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; model?: unk
 			compactAfterTokens: 30,
 			observationsPoolMaxTokens: 40,
 			observationsPoolTargetTokens: 20,
+			reflectionsPoolMaxTokens: 30,
+			reflectionsPoolTargetTokens: 20,
 			passive: false,
 		},
 		consolidationInFlight: false,
@@ -40,6 +42,7 @@ function setup(args: { entries: TestEntry[]; runtime?: Partial<any>; model?: unk
 		compactHookInFlight: false,
 		lastObserverError: undefined,
 		lastReflectorError: undefined,
+		lastConsolidatorError: undefined,
 		lastDropperError: undefined,
 		...args.runtime,
 	};
@@ -66,7 +69,7 @@ describe("V3 /om:status", () => {
 
 		expect(output).toContain("── Memory ──");
 		expect(output).toContain("Observations: 0 recorded / 0 dropped / 0 active / 0 visible");
-		expect(output).toContain("Reflections:  0 recorded / 0 visible");
+		expect(output).toContain("Reflections:  0 recorded / 0 superseded / 0 active / 0 visible");
 		expect(output).toContain("Next observation:");
 		expect(output).toContain("Next compaction:");
 		expect(output).not.toContain("Visible:");
@@ -83,7 +86,7 @@ describe("V3 /om:status", () => {
 			textCustomMessage("raw-1", "aaaa"),
 			oldV2ObservationEntry("v2-obs"),
 			compactionEntry("cmp-v2", { firstKeptEntryId: "raw-1", details: oldV2CompactionDetails() }),
-			compactionEntry("cmp-visible", { firstKeptEntryId: "raw-1", details: memoryDetails({ observations: [obsA], reflections: [] }) }),
+			compactionEntry("cmp-visible", { firstKeptEntryId: "raw-1", details: memoryDetails({ observations: [obsA], reflections: [reflection("111111111111", ["aaaaaaaaaaaa"], { tokenCount: 2 })] }) }),
 			observationsRecordedEntry("om-obs", { observations: [obsA, obsB], coversUpToId: "raw-1" }),
 			reflectionsRecordedEntry("om-ref", { reflections: [ref], coversUpToId: "om-obs" }),
 			observationsDroppedEntry("om-drop", { observationIds: ["aaaaaaaaaaaa"], coversUpToId: "om-ref" }),
@@ -92,7 +95,7 @@ describe("V3 /om:status", () => {
 		const output = await setup({ entries }).run();
 
 		expect(output).toContain("Observations: 2 recorded / 1 dropped / 1 active / 1 visible +1 -1");
-		expect(output).toContain("Reflections:  1 recorded / 0 visible +1");
+		expect(output).toContain("Reflections:  1 recorded / 0 superseded / 1 active / 1 visible +1 -1");
 		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
 		// Active pool counts the full rendered line (id + timestamp + relevance + content).
 		expect(output).toContain("Active observation pool: ~19 / 20 target tokens (95%)");
@@ -125,7 +128,7 @@ describe("V3 /om:status", () => {
 		expect(output).toContain("Visible observation pool: ~5 / 40 tokens (13%)");
 		// Active pool counts the full rendered line, unlike the visible pool's stored tokenCount.
 		expect(output).toContain("Active observation pool: ~19 / 20 target tokens (95%)");
-		expect(output).toContain("Reflection pool:         ~3 tokens");
+		expect(output).toContain("Active reflection pool: ~3 / 20 target / 30 max tokens (15% target)");
 		expect(output).not.toContain("Observation pool:");
 		expect(output).not.toContain("Full fold pool:");
 		expect(output).not.toContain("visible observation tokens");
@@ -165,25 +168,27 @@ describe("V3 /om:status", () => {
 		const output = await setup({
 			entries: [],
 			runtime: {
-				config: { observeAfterTokens: 10, reflectAfterTokens: 20, compactAfterTokens: 30, observationsPoolMaxTokens: 40, observationsPoolTargetTokens: 20, passive: true },
+				config: { observeAfterTokens: 10, reflectAfterTokens: 20, compactAfterTokens: 30, observationsPoolMaxTokens: 40, observationsPoolTargetTokens: 20, reflectionsPoolMaxTokens: 30, reflectionsPoolTargetTokens: 20, passive: true },
 				consolidationInFlight: true,
-				consolidationPhase: "reflector",
+				consolidationPhase: "consolidator",
 				compactInFlight: true,
 				compactHookInFlight: true,
 				lastObserverError: "observer failed",
 				lastReflectorError: "reflect failed",
+				lastConsolidatorError: "consolidate failed",
 				lastDropperError: "drop failed",
 			},
 		}).run();
 
 		expect(output).toContain("Passive: automatic memory workers and auto-compaction disabled");
-		expect(output).toContain("Consolidation: running (reflector)");
+		expect(output).toContain("Consolidation: running (consolidator)");
 		expect(output).not.toContain("Observer: running");
 		expect(output).not.toContain("Reflect/drop: running");
 		expect(output).toContain("Auto-compaction: running");
 		expect(output).toContain("Compaction hook: running");
 		expect(output).toContain("Observer: observer failed");
 		expect(output).toContain("Reflector: reflect failed");
+		expect(output).toContain("Consolidator: consolidate failed");
 		expect(output).toContain("Dropper: drop failed");
 	});
 
@@ -207,6 +212,8 @@ describe("V3 /om:status", () => {
 						compactAfterTokensRatio: 0.5,
 						observationsPoolMaxTokens: 40,
 						observationsPoolTargetTokens: 20,
+						reflectionsPoolMaxTokens: 30,
+						reflectionsPoolTargetTokens: 20,
 						passive: false,
 					},
 				},
@@ -229,6 +236,8 @@ describe("V3 /om:status", () => {
 						compactAfterTokensRatio: 0.5,
 						observationsPoolMaxTokens: 40,
 						observationsPoolTargetTokens: 20,
+						reflectionsPoolMaxTokens: 30,
+						reflectionsPoolTargetTokens: 20,
 						passive: false,
 					},
 				},
@@ -251,6 +260,8 @@ describe("V3 /om:status", () => {
 						compactAfterTokensRatio: 0.5,
 						observationsPoolMaxTokens: 40,
 						observationsPoolTargetTokens: 20,
+						reflectionsPoolMaxTokens: 30,
+						reflectionsPoolTargetTokens: 20,
 						passive: false,
 					},
 				},
@@ -272,6 +283,8 @@ describe("V3 /om:status", () => {
 						compactAfterTokensRatio: 0.5,
 						observationsPoolMaxTokens: 40,
 						observationsPoolTargetTokens: 20,
+						reflectionsPoolMaxTokens: 30,
+						reflectionsPoolTargetTokens: 20,
 						passive: false,
 					},
 				},

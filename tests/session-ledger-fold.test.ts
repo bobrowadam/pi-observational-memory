@@ -8,6 +8,7 @@ import {
 	observationsRecordedEntry,
 	oldV2ObservationEntry,
 	reflection,
+	reflectionsConsolidatedEntry,
 	reflectionsRecordedEntry,
 	textCustomMessage,
 } from "./fixtures/session.js";
@@ -69,6 +70,65 @@ describe("session-ledger V3 folding", () => {
 		expect(folded.reflectionsById.get("eeeeeeeeeeee")?.content).toBe("first reflection");
 		expect(folded.observations).toHaveLength(1);
 		expect(folded.reflections).toHaveLength(1);
+	});
+
+	it("preserves historical reflections while excluding superseded reflections from active state", () => {
+		const refA = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const refB = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
+		const replacement = reflection("111111111111", ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-refs", { reflections: [refA, refB], coversUpToId: "raw-1" }),
+			reflectionsConsolidatedEntry("om-consolidated", {
+				entries: [{ replacement, supersededReflectionIds: [refA.id, refB.id] }],
+				coversUpToId: "raw-1",
+			}),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.reflections.map((ref) => ref.id)).toEqual([refA.id, refB.id, replacement.id]);
+		expect(folded.activeReflections).toEqual([replacement]);
+		expect(folded.supersededReflectionIds).toEqual(new Set([refA.id, refB.id]));
+		expect(folded.reflectionsById.get(refA.id)).toEqual(refA);
+	});
+
+	it("applies consolidation events atomically and ignores unknown, stale, or reused events", () => {
+		const refA = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const refB = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
+		const atomicReplacement = reflection("111111111111", ["aaaaaaaaaaaa"]);
+		const unknownReplacement = reflection("222222222222", ["bbbbbbbbbbbb"]);
+		const validReplacement = reflection("333333333333", ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+		const staleReplacement = reflection("444444444444", ["aaaaaaaaaaaa"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-refs", { reflections: [refA, refB], coversUpToId: "raw-1" }),
+			reflectionsConsolidatedEntry("om-atomic-noop", {
+				entries: [
+					{ replacement: atomicReplacement, supersededReflectionIds: [refA.id] },
+					{ replacement: unknownReplacement, supersededReflectionIds: ["aaaaaaaaaaaa"] },
+				],
+				coversUpToId: "raw-1",
+			}),
+			reflectionsConsolidatedEntry("om-valid", {
+				entries: [{ replacement: validReplacement, supersededReflectionIds: [refA.id, refB.id] }],
+				coversUpToId: "raw-1",
+			}),
+			reflectionsConsolidatedEntry("om-stale-noop", {
+				entries: [{ replacement: staleReplacement, supersededReflectionIds: [refA.id] }],
+				coversUpToId: "raw-1",
+			}),
+			reflectionsConsolidatedEntry("om-reused-noop", {
+				entries: [{ replacement: refB, supersededReflectionIds: [validReplacement.id] }],
+				coversUpToId: "raw-1",
+			}),
+		];
+
+		const folded = foldLedger(entries);
+
+		expect(folded.reflections.map((ref) => ref.id)).toEqual([refA.id, refB.id, validReplacement.id]);
+		expect(folded.activeReflections).toEqual([validReplacement]);
+		expect(folded.supersededReflectionIds).toEqual(new Set([refA.id, refB.id]));
 	});
 
 	it("retains tombstones for unknown drop ids without throwing", () => {

@@ -60,6 +60,8 @@ Reflections are written by the reflector into `om.reflections.recorded` ledger e
 
 A reflection's `supportingObservationIds` are downstream dropper coverage evidence. They should include all and only current observations whose durable meaning the reflection preserves with equivalent fidelity. False or inflated support ids can make later pruning look safer than it is.
 
+`reflectionsPoolMaxTokens` is a soft trigger threshold for the active reflection pool, not a hard upper bound. When the active reflection pool is strictly above it, the consolidator may replace groups of active reflections with shorter reflections toward `reflectionsPoolTargetTokens`. A safe reduction can preserve the supporting observation ids as an ordered union. If no safe reduction is produced, the active pool can remain over max while its unchanged fingerprint enters cooldown; another attempt becomes eligible when the pool changes.
+
 ### Drops
 
 A drop is a tombstone for observation ids that should no longer be active memory. Drops are written by the dropper into `om.observations.dropped` ledger entries.
@@ -70,19 +72,23 @@ Dropping does not delete history. Dropped observations remain recallable from le
 
 ### Observer
 
-The observer runs asynchronously from `turn_end` when raw/source tokens after the latest observation coverage marker reach `observeAfterTokens`. After a deliberate empty result, it waits for another `observeAfterTokens` of source tokens before retrying the uncovered range.
+The observer runs asynchronously from `agent_start` or `turn_end` when raw/source tokens after the latest observation coverage marker reach `observeAfterTokens`. After a deliberate empty result, it waits for another `observeAfterTokens` of source tokens before retrying the uncovered range.
 
 It receives an oldest-first chunk of raw/source entries, validates source ids, and appends a non-empty `om.observations.recorded` entry. Chunking targets a fixed 60,000 estimated tokens but always includes at least one entry, so a single oversized entry cannot stall coverage. If there is nothing worth recording, it writes no entry and leaves the raw range uncovered.
 
 ### Reflector
 
-The reflector runs in the reflect/drop lane from `turn_end` when its raw-token clock reaches `reflectAfterTokens` and the observer is not due.
+The reflector is the second stage in the observer → reflector → consolidator → dropper pipeline. On each triggered `agent_start` or `turn_end` run, it is checked after the observer stage; when its raw-token clock reaches `reflectAfterTokens`, it runs against the observer's current coverage, including successful same-run observer output.
 
 It reads active observations and current reflections, then appends durable new reflections as `om.reflections.recorded`. Reflections must cite valid supporting observation ids. The reflector's coverage annotations describe current support state only; this first coverage-stewardship model does not repair historical coverage on existing reflections that already missed a supporting observation id.
 
+### Consolidator
+
+The consolidator is the third stage in the background pipeline: observer → reflector → consolidator → dropper. The same run continues to this stage after the reflector stage completes or is skipped, and it runs only when the folded active reflection pool is strictly above the soft `reflectionsPoolMaxTokens` trigger. It receives active reflections, not superseded history, and proposes safe shorter replacements toward `reflectionsPoolTargetTokens`. It may reduce fewer reflections than needed or produce no output when reduction would lose durable meaning, leaving the pool over max. After a no-output attempt, the unchanged active reflection pool is cooled down until its fingerprint changes.
+
 ### Dropper
 
-The dropper runs only as post-reflection maintenance: after the reflector records non-empty same-turn reflections, the dropper may run if the folded active observation ledger is over `observationsPoolTargetTokens`. The dropper can see same-turn new reflections before deciding what to prune.
+The dropper is the final stage in the observer → reflector → consolidator → dropper pipeline. It runs only as post-reflection maintenance: after the reflector records non-empty same-turn reflections, it may run if the folded active observation ledger is over `observationsPoolTargetTokens`. The dropper can see same-turn new reflections before deciding what to prune. Consolidator output is not required for dropper eligibility.
 
 The dropper can only drop active observation ids. It cannot rewrite or merge observations. Relevance is treated as importance/resistance rather than an absolute lock: `critical` observations are the highest-resistance candidates, but they can be dropped when the model judges that age, reflection coverage, supersession, redundancy, and semantic safety make removal from active memory safe. Its maximum drop count is computed from tokens over target converted to an approximate observation count, and the model may drop fewer or none.
 
@@ -90,7 +96,7 @@ The dropper can only drop active observation ids. It cannot rewrite or merge obs
 
 The compaction hook runs during `session_before_compact`. In V3 it is deterministic and model-free:
 
-- it does not run observer, reflector, or dropper;
+- it does not run observer, reflector, consolidator, or dropper;
 - it does not call a model;
 - it does not wait for background memory workers;
 - it folds/projects ledger state and renders the summary.
@@ -99,7 +105,7 @@ This is the main reason V3 compactions should feel instantaneous compared with V
 
 ## Ledger entries
 
-V3 uses three custom memory ledger entry types:
+V3 uses four custom memory ledger entry types:
 
 ```ts
 om.observations.recorded: {
@@ -112,11 +118,21 @@ om.reflections.recorded: {
   coversUpToId: string;
 }
 
+om.reflections.consolidated: {
+  entries: {
+    replacement: Reflection;
+    supersededReflectionIds: string[];
+  }[];
+  coversUpToId: string;
+}
+
 om.observations.dropped: {
   observationIds: string[];
   coversUpToId: string;
 }
 ```
+
+`om.reflections.consolidated` is append-only: it records replacement reflections and the active reflection ids each replacement supersedes; it never edits or deletes the earlier records. Folded active memory excludes superseded reflections, while full ledger history retains both active and superseded records.
 
 The compaction hook writes V3 folded details on Pi compaction entries:
 
@@ -144,7 +160,7 @@ It is not:
 
 Source provenance lives on `Observation.sourceEntryIds` and `Reflection.supportingObservationIds`.
 
-Progress counting uses raw/source tokens after the marker. Raw/source entries are `message`, `custom_message`, and `branch_summary` entries; memory ledger entries and compaction entries do not add raw-token progress.
+Progress counting uses raw/source tokens after the marker. Raw/source entries are `message`, `custom_message`, and `branch_summary` entries; memory ledger entries and compaction entries do not add raw-token progress. A consolidation entry's `coversUpToId` anchors its projection boundary, but `om.reflections.consolidated` does not advance raw source coverage or reflection coverage (the reflector's raw-token coverage clock); those clocks advance only from their corresponding recorded entries.
 
 ## Visible, full, and drift
 
@@ -163,9 +179,12 @@ Visible and full memory can differ intentionally. Background ledger work may hap
 Recall can return:
 
 - an observation, marked `active` or `dropped`;
-- a reflection plus supporting observations;
+- a reflection plus supporting observations, marked `active` or `superseded`;
+- direct and transitive reflection lineage: a replacement reports the reflections it supersedes, while a superseded reflection reports its replacement chain;
 - a mixed result if an id collision exists;
 - missing/non-source diagnostics when source evidence is unavailable.
+
+Consolidation events store direct replacement links. Recall follows those links transitively, so if `A` is replaced by `B` and `B` by `C`, recalling `A` reports `B` and `C` as replacements, while recalling `C` reports `B` and `A` as superseded lineage.
 
 Use recall when compacted memory matters and exact source evidence is needed before acting.
 
@@ -203,7 +222,9 @@ When upgrading from V2, update settings and start a new clean session.
 | Progress watermark | `coversUpToId`; marker used for raw-token progress clocks. |
 | Observer | Background agent that records observations. |
 | Reflector | Background agent that records durable reflections. |
+| Consolidator | Background agent that replaces active reflections with shorter reflections. |
 | Dropper | Background agent that drops active observations by id. |
+| Superseded reflection | Historical reflection replaced by a later consolidation; retained for recall but excluded from active projections. |
 | Recall | Agent tool for exact evidence behind a memory id. |
 
 ## Where to go next

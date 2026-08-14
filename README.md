@@ -89,7 +89,7 @@ Examples:
 
 Reflections help the agent stay oriented over time. The reflector treats coverage as stewardship: every active observation it reviews includes a `none`, `partial`, or `strong` coverage tier, but those tiers are review context rather than quotas. When the reflector emits a durable reflection, its support ids should cover all and only the observations whose durable meaning is actually preserved, because those ids later become dropper coverage evidence.
 
-Together, observations and reflections let Pi carry the important parts of the session forward without depending on fragile summary chains.
+Together, observations and reflections let Pi carry the important parts of the session forward without depending on fragile summary chains. Reflection consolidation is append-only: a replacement names the active reflections it supersedes. The superseded records remain in ledger history for `recall`, which reports their status and the replacement lineage; active-only projections and worker prompts exclude them.
 
 ---
 
@@ -212,12 +212,14 @@ A typical config:
     "compactAfterTokensRatio": 0.68,
     "observationsPoolMaxTokens": 20000,
     "observationsPoolTargetTokens": 10000,
+    "reflectionsPoolMaxTokens": 3000,
+    "reflectionsPoolTargetTokens": 2000,
     "agentMaxTurns": 16,
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
       "thinking": "low",
-      "thinkingByWorker": { "reflector": "high" }
+      "thinkingByWorker": { "reflector": "high", "consolidator": "max" }
     },
     "showWorkerNotifications": true,
     "passive": false,
@@ -280,13 +282,15 @@ on the `Next compaction` line regardless of mode.
 | `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Tunable because large windows do not always mean strong long-range attention. Must be in `(0, 1)`. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
 | `observationsPoolTargetTokens` | half of max | Active observation target used by post-reflection dropper maintenance.                            |
+| `reflectionsPoolMaxTokens`  | `3000`        | Soft trigger threshold for active reflection-pool consolidation.                                  |
+| `reflectionsPoolTargetTokens` | two thirds of max | Active reflection target the consolidator works toward; it may make fewer reductions when meaning would be lost. |
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
 | `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking, thinkingByWorker }`.            |
-| `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, and dropper progress notifications. Warnings and errors are unaffected. |
+| `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, consolidator, and dropper progress notifications. Warnings and errors are unaffected. |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |
 
-`model.thinkingByWorker` can override `observer`, `reflector`, or `dropper` individually. Unset workers use `model.thinking`, then fall back to `low`.
+`model.thinkingByWorker` can override `observer`, `reflector`, `consolidator`, or `dropper` individually. Unset workers use `model.thinking`, then fall back to `low`.
 
 Valid thinking values are:
 
@@ -304,9 +308,11 @@ Set `showWorkerNotifications` to `false` to hide routine worker start and comple
 
 `observationsPoolMaxTokens` and `observationsPoolTargetTokens` intentionally describe different pools. Max tokens control when compaction performs a full fold over visible memory. Target tokens control the folded active observation pool that the dropper maintains after successful reflection. If the target is omitted, it defaults to half of max.
 
+`reflectionsPoolMaxTokens` is a soft trigger threshold, not a hard upper bound, for the active reflection pool. The consolidator runs only when active reflection tokens are strictly over max and proposes append-only replacements toward the target; the target defaults to two thirds of max. A safe no-output run can leave the active pool over max, while its unchanged fingerprint is cooled down until the pool changes. Recorded reflections that a consolidation supersedes remain historical and recallable, but only active reflections enter the pool or worker prompts.
+
 Dropper pruning balances age, relevance, and reflection coverage. Relevance is importance/resistance, not a permanent active-memory pin: `critical` observations require the strongest evidence but can be dropped when they are older and safely represented by reflections, superseded by newer memory, redundant, or obsolete. Dropper input annotates each active observation with deterministic coverage evidence: `none`, `partial`, or `strong`; coverage guides model judgment and is not an automatic drop rule. Dropping removes observations from active memory, not ledger history.
 
-When `debugLog` is enabled, debug events are written as local NDJSON files under Pi's agent directory. Normal sessions write to `observational-memory/debug/<session-id>.ndjson`; contexts without a session id fall back to `observational-memory/debug.ndjson`. Debug rows include `sessionId` and per-consolidation `runId`, so a session file can still be filtered to one observer/reflector/dropper run.
+When `debugLog` is enabled, debug events are written as local NDJSON files under Pi's agent directory. Normal sessions write to `observational-memory/debug/<session-id>.ndjson`; contexts without a session id fall back to `observational-memory/debug.ndjson`. Debug rows include `sessionId` and per-consolidation `runId`, so a session file can still be filtered to one observer/reflector/consolidator/dropper run.
 
 For details and tuning guidance, see [`docs/configuration.md`](docs/configuration.md).
 
@@ -316,7 +322,7 @@ For details and tuning guidance, see [`docs/configuration.md`](docs/configuratio
 
 | Surface             | What it does                                                                                                                                    |
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/om:status`        | Shows memory counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, visible and active observation pool pressure, passive/in-flight state, and last worker errors. |
+| `/om:status`        | Shows memory counts, active/superseded reflection counts, plain `+N` / `-N` visible/full drift suffixes, progress clocks, both active-pool metrics, passive/in-flight state, and last worker errors. |
 | `/om:view`          | Shows current visible memory and attempts to copy the rendered memory text to the clipboard.                                                   |
 | `/om:view full`     | Shows the full current memory state for the branch and attempts to copy the rendered memory text to the clipboard.                             |
 | `recall` agent tool | Recovers source evidence for a 12-character observation/reflection id on the current branch. It is not semantic search or a transcript browser. |
@@ -367,7 +373,7 @@ Current behavior:
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
 * **Fast compaction.** `session_before_compact` does not call a model or wait for background workers. It renders the current prepared memory state.
-* **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
+* **Background memory work.** The pipeline is observer → reflector → consolidator → dropper: each triggered run attempts those stages in order, with later stages checking the ledger updated by earlier stages in the same run. Observation and reflection work run when their clocks are due, the consolidator reduces an over-max active reflection pool when safe, and dropper work runs only after successful same-run reflection to prune the folded active observation ledger toward `observationsPoolTargetTokens`.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
 * **Visible/full views.** `/om:view` shows visible memory and `/om:view full` shows the full current memory state. Use `/om:status` for visible-vs-full drift and for the separate visible observation pool vs active observation pool.
 * **No V2 compatibility layer.** Old V2 settings and memory entries are ignored rather than migrated.

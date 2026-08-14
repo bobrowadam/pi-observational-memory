@@ -15,6 +15,7 @@ import {
 	observationsRecordedEntry,
 	oldV2CompactionDetails,
 	reflection,
+	reflectionsConsolidatedEntry,
 	reflectionsRecordedEntry,
 	textCustomMessage,
 } from "./fixtures/session.js";
@@ -35,6 +36,45 @@ describe("session-ledger V3 projections", () => {
 
 		expect(projection.observations.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
 		expect(projection.reflections.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
+	});
+
+	it("projects only active reflection replacements while keeping history in the ledger", () => {
+		const originalA = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const originalB = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
+		const replacement = reflection("111111111111", ["aaaaaaaaaaaa", "bbbbbbbbbbbb"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-refs", { reflections: [originalA, originalB], coversUpToId: "raw-1" }),
+			reflectionsConsolidatedEntry("om-consolidated", {
+				entries: [{ replacement, supersededReflectionIds: [originalA.id, originalB.id] }],
+				coversUpToId: "raw-1",
+			}),
+		];
+
+		expect(fullProjection(entries).reflections).toEqual([replacement]);
+		const compacted = buildCompactionProjection(entries, "raw-1", { observationsPoolMaxTokens: 0 });
+		expect(compacted.reflections).toEqual([replacement]);
+		expect(compacted.details.reflections).toEqual([replacement]);
+	});
+
+	it("treats an invalid multi-replacement consolidation event as an atomic no-op", () => {
+		const originalA = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
+		const originalB = reflection("ffffffffffff", ["bbbbbbbbbbbb"]);
+		const replacementA = reflection("111111111111", ["aaaaaaaaaaaa"]);
+		const replacementB = reflection("222222222222", ["bbbbbbbbbbbb"]);
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			reflectionsRecordedEntry("om-refs", { reflections: [originalA, originalB], coversUpToId: "raw-1" }),
+			reflectionsConsolidatedEntry("om-invalid", {
+				entries: [
+					{ replacement: replacementA, supersededReflectionIds: [originalA.id] },
+					{ replacement: replacementB, supersededReflectionIds: ["aaaaaaaaaaaa"] },
+				],
+				coversUpToId: "raw-1",
+			}),
+		];
+
+		expect(fullProjection(entries).reflections).toEqual([originalA, originalB]);
 	});
 
 	it("visible projection is empty when there is no V3 compaction", () => {
@@ -192,8 +232,12 @@ describe("session-ledger V3 projections", () => {
 		expect(buildCompactionProjection(entries, "raw-1", { observationsPoolMaxTokens: 50 }).fullFold).toBe(true);
 	});
 
-	it("reports visible/full drift", () => {
-		const visible = { observations: [observation("aaaaaaaaaaaa")], reflections: [] };
+	it("reports visible/full drift in both reflection directions", () => {
+		const staleVisibleReflection = reflection("ffffffffffff", ["aaaaaaaaaaaa"]);
+		const visible = {
+			observations: [observation("aaaaaaaaaaaa")],
+			reflections: [staleVisibleReflection],
+		};
 		const full = {
 			observations: [observation("aaaaaaaaaaaa"), observation("bbbbbbbbbbbb")],
 			reflections: [reflection("eeeeeeeeeeee", ["bbbbbbbbbbbb"])],
@@ -203,5 +247,6 @@ describe("session-ledger V3 projections", () => {
 
 		expect(diff.observationsOnlyInFull.map((obs) => obs.id)).toEqual(["bbbbbbbbbbbb"]);
 		expect(diff.reflectionsOnlyInFull.map((ref) => ref.id)).toEqual(["eeeeeeeeeeee"]);
+		expect(diff.reflectionsOnlyInVisible).toEqual([staleVisibleReflection]);
 	});
 });
