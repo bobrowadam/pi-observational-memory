@@ -368,7 +368,9 @@ Current behavior:
 
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
-* **Fast compaction.** When prepared V3 memory exists, `session_before_compact` renders it without calling a model or waiting for background workers. An empty V3 projection delegates to Pi's native summarizer instead of replacing prior context with an empty summary.
+* **Fast compaction.** `session_before_compact` renders prepared memory without calling a model or waiting for background workers. An acknowledged prefix can be compacted even when it produced no memory.
+* **Acknowledged-history retention.** Compaction preserves both Pi's recent raw tail and all source entries not yet acknowledged by the observer. It extends the tail backward to keep tool calls and their results together, and cancels if no current source prefix can safely be removed.
+* **Independent observer coverage.** Successful observer passes acknowledge their chunk even with zero observations. Failed, aborted, or truncated passes do not advance coverage. Covered sources retained in the raw tail are not observed again.
 * **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
 * **Visible/full views.** `/om:view` shows visible memory and `/om:view full` shows the full current memory state. Use `/om:status` for visible-vs-full drift and for the separate visible observation pool vs active observation pool.

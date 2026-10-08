@@ -246,28 +246,6 @@ async function runObserverStage(
 	const tokens = real !== undefined ? real : rawTokensSinceObservationCoverage(entries); // fallback: no usage baseline / basis change
 	if (tokens < runtime.config.observeAfterTokens) return "continue";
 
-	const sessionMetadata = debugSessionMetadata(ctx);
-	const sessionIdentity = sessionMetadata.sessionId ?? sessionMetadata.sessionFile;
-	const coverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
-
-	// Deliberate-empty backoff (#23): an intentional "nothing to record" verdict
-	// must not re-fire the observer every turn over the same span. Retry only
-	// after another observeAfterTokens worth of new source tokens arrives, and
-	// drop the backoff as soon as coverage advances.
-	const backoff = runtime.observerEmptyBackoff;
-	if (backoff) {
-		if (
-			sessionIdentity !== backoff.sessionIdentity
-			|| coverageId !== backoff.coverageId
-			|| tokens >= backoff.tokensAtEmpty + runtime.config.observeAfterTokens
-		) {
-			runtime.observerEmptyBackoff = undefined;
-		} else {
-			debugLog("observer.empty_backoff", { tokens, resumeAtTokens: backoff.tokensAtEmpty + runtime.config.observeAfterTokens });
-			return "continue";
-		}
-	}
-
 	// Resolve the model before building the chunk: the default chunk cap
 	// derives from the resolved model's context window.
 	const resolved = await resolveModel("observer");
@@ -346,19 +324,7 @@ async function runObserverStage(
 		}
 		throw error;
 	}
-	if (!observations || observations.length === 0) {
-		// Deliberate empty: routine info, not a warning, and back off re-fires
-		// over the same span (#23).
-		debugLog("observer.empty", { coversUpToId });
-		runtime.observerEmptyBackoff = { sessionIdentity, coverageId, tokensAtEmpty: tokens };
-		if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-			"Observational memory: observer found nothing new in this chunk (coverage unchanged; will retry later)",
-			"info",
-		);
-		return "continue";
-	}
-	runtime.observerEmptyBackoff = undefined;
-
+	observations ??= [];
 	const data = buildObservationsRecordedData(observations, coversUpToId);
 	if (!data) return "continue";
 	debugLog("observer.records", {
@@ -369,7 +335,9 @@ async function runObserverStage(
 	appendEntry(pi, OM_OBSERVATIONS_RECORDED, data);
 	debugLog("observer.appended", { count: observations.length, coversUpToId });
 	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
-		`Observational memory: ${observations.length} observation${observations.length === 1 ? "" : "s"} recorded`,
+		observations.length === 0
+			? "Observational memory: observer found nothing new in this chunk (coverage advanced)"
+			: `Observational memory: ${observations.length} observation${observations.length === 1 ? "" : "s"} recorded`,
 		"info",
 	);
 	return "continue";
@@ -389,6 +357,8 @@ async function runReflectorStage(
 
 	const observationCoverageId = latestCoverageMarkerId(entries, OM_OBSERVATIONS_RECORDED);
 	if (!observationCoverageId) return { outcome: "continue", sameRunReflections: [] };
+	const folded = foldLedger(entries);
+	if (folded.activeObservations.length === 0) return { outcome: "continue", sameRunReflections: [] };
 
 	if (shouldNotifyWorker(runtime, ctx)) ctx.ui?.notify(
 		`Observational memory: reflector running (~${reflectionTokens.toLocaleString()} tokens)`,
@@ -397,7 +367,6 @@ async function runReflectorStage(
 	const resolved = await resolveModel("reflector");
 	if (!resolved) return { outcome: "abort", sameRunReflections: [] };
 
-	const folded = foldLedger(entries);
 	const reflections = await runReflector({
 		model: resolved.model as any,
 		apiKey: resolved.apiKey,

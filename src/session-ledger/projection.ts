@@ -163,9 +163,9 @@ export function latestFullFoldBoundaryId(entries: Entry[]): string | undefined {
 		if (entry.type !== "compaction") continue;
 		if (!isMemoryDetails(entry.details)) continue;
 		if (!entry.details.fullFold) continue;
-		if (!entry.firstKeptEntryId) continue;
-		if (!indexes.has(entry.firstKeptEntryId)) continue;
-		return entry.firstKeptEntryId;
+		const boundaryId = entry.details.coversUpToId ?? entry.firstKeptEntryId;
+		if (!boundaryId || !indexes.has(boundaryId)) continue;
+		return boundaryId;
 	}
 	return undefined;
 }

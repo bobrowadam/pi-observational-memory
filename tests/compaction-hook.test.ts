@@ -10,6 +10,7 @@ import {
 	oldV2CompactionDetails,
 	oldV2ObservationEntry,
 	reflection,
+	rawMessage,
 	reflectionsRecordedEntry,
 	textCustomMessage,
 	type TestEntry,
@@ -52,13 +53,13 @@ function setup(args: { entries: TestEntry[]; observationsPoolMaxTokens?: number;
 }
 
 describe("V3 compaction hook", () => {
-	it("delegates to native compaction when there is no V3 memory", async () => {
+	it("cancels compaction when no source history is acknowledged", async () => {
 		const entries = [textCustomMessage("raw-1", "aaaa")];
 		const { run, runtime, pi } = setup({ entries });
 
 		const result = await run("raw-1");
 
-		expect(result).toBeUndefined();
+		expect(result).toEqual({ cancel: true });
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 		expect(runtime.compactHookInFlight).toBe(false);
@@ -68,6 +69,7 @@ describe("V3 compaction hook", () => {
 		const obs1 = observation("aaaaaaaaaaaa", { sourceEntryIds: ["raw-1"], tokenCount: 10 });
 		const ref1 = reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"]);
 		const entries = [
+			textCustomMessage("raw-0", "earlier routine source"),
 			textCustomMessage("raw-1", "aaaa"),
 			observationsRecordedEntry("om-aaaaaaaaaaaa", { observations: [obs1], coversUpToId: "raw-1" }),
 			reflectionsRecordedEntry("om-eeeeeeeeeeee", { reflections: [ref1], coversUpToId: "raw-1" }),
@@ -133,7 +135,7 @@ describe("V3 compaction hook", () => {
 		expect(result.compaction.details.reflections.map((ref: any) => ref.id)).toEqual(["eeeeeeeeeeee", "ffffffffffff"]);
 	});
 
-	it("delegates to native compaction when only old V2 memory exists", async () => {
+	it("does not let old V2 memory bypass observer coverage safety", async () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),
 			oldV2ObservationEntry("v2-obs"),
@@ -143,7 +145,7 @@ describe("V3 compaction hook", () => {
 
 		const result = await run("cmp-v2");
 
-		expect(result).toBeUndefined();
+		expect(result).toEqual({ cancel: true });
 	});
 
 	it("does not wait for worker promises or call model resolution", async () => {
@@ -155,8 +157,147 @@ describe("V3 compaction hook", () => {
 			new Promise((_, reject) => setTimeout(() => reject(new Error("timed out")), 50)),
 		]);
 
-		expect(result).toBeUndefined();
+		expect(result).toEqual({ cancel: true });
 		expect(runtime.resolveModel).not.toHaveBeenCalled();
+	});
+
+	it("retains the uncovered user question even when Pi's cut is later", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["old"] });
+		const entries = [
+			textCustomMessage("old", "acknowledged history"),
+			observationsRecordedEntry("om-old", { observations: [obs], coversUpToId: "old" }),
+			rawMessage("question", "Compare the AAI reminder methods."),
+			textCustomMessage("research", "lookup progress"),
+			textCustomMessage("skill", "large research guidance"),
+		];
+		const { run } = setup({ entries });
+		await expect(run("skill")).resolves.toMatchObject({ compaction: { firstKeptEntryId: "question", tokensBefore: 123 } });
+	});
+
+	it("preserves Pi's earlier recent boundary and includes acknowledged overlapping memory", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["old", "recent"] });
+		const entries = [
+			textCustomMessage("old", "old source"),
+			textCustomMessage("recent", "recent source"),
+			textCustomMessage("covered", "last acknowledged source"),
+			observationsRecordedEntry("om-covered", { observations: [obs], coversUpToId: "covered" }),
+			rawMessage("question", "new request"),
+		];
+		const { run } = setup({ entries });
+		await expect(run("recent")).resolves.toMatchObject({ compaction: {
+			firstKeptEntryId: "recent",
+			details: { observations: [obs] },
+		} });
+	});
+
+	it("compacts an acknowledged empty prefix without falling back to native summarization", async () => {
+		const entries = [
+			textCustomMessage("old", "routine history"),
+			observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "old" }),
+			rawMessage("question", "unprocessed request"),
+		];
+		const { run } = setup({ entries });
+		await expect(run("question")).resolves.toMatchObject({ compaction: {
+			firstKeptEntryId: "question",
+			summary: "",
+			details: { observations: [], reflections: [] },
+		} });
+	});
+
+	it("retains the caller and both results of a partially covered tool batch without losing its memory", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["old", "call", "result-a"] });
+		const entries = [
+			textCustomMessage("old", "older source"),
+			rawMessage("call", "", { message: { role: "assistant", content: [
+				{ type: "toolCall", id: "tool-a", name: "lookup", arguments: {} },
+				{ type: "toolCall", id: "tool-b", name: "lookup", arguments: {} },
+			] } }),
+			rawMessage("result-a", "", { message: { role: "toolResult", toolCallId: "tool-a", content: [] } }),
+			observationsRecordedEntry("om-covered", { observations: [obs], coversUpToId: "result-a" }),
+			rawMessage("result-b", "", { message: { role: "toolResult", toolCallId: "tool-b", content: [] } }),
+			rawMessage("question", "next request"),
+		];
+		const { run } = setup({ entries });
+		await expect(run("question")).resolves.toMatchObject({ compaction: {
+			firstKeptEntryId: "call",
+			details: { observations: [obs] },
+		} });
+	});
+
+	it("can move the raw cut across a prior compaction to restore an intact tool exchange", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["old"] });
+		const entries = [
+			textCustomMessage("old", "older source"),
+			observationsRecordedEntry("om-old", { observations: [obs], coversUpToId: "old" }),
+			rawMessage("call", "", { message: { role: "assistant", content: [{ type: "toolCall", id: "tool-a", name: "lookup", arguments: {} }] } }),
+			compactionEntry("previous", { firstKeptEntryId: "old", details: memoryDetails({ observations: [obs] }) }),
+			rawMessage("result", "", { message: { role: "toolResult", toolCallId: "tool-a", content: [] } }),
+		];
+		const { run } = setup({ entries });
+		await expect(run("result")).resolves.toMatchObject({ compaction: { firstKeptEntryId: "call" } });
+	});
+
+	it("preserves a full-fold checkpoint's maintenance state after retaining an overlapping tool batch", async () => {
+		const obsA = observation("aaaaaaaaaaaa", { sourceEntryIds: ["old"], tokenCount: 80 });
+		const obsB = observation("bbbbbbbbbbbb", { sourceEntryIds: ["call", "result-a"], tokenCount: 30 });
+		const refA = reflection("eeeeeeeeeeee", [obsA.id]);
+		const refB = reflection("ffffffffffff", [obsB.id]);
+		const entries = [
+			textCustomMessage("old", "older source"),
+			observationsRecordedEntry("om-a", { observations: [obsA], coversUpToId: "old" }),
+			reflectionsRecordedEntry("ref-a", { reflections: [refA], coversUpToId: "old" }),
+			observationsDroppedEntry("drop-a", { observationIds: [obsA.id], coversUpToId: "old" }),
+			rawMessage("call", "", { message: { role: "assistant", content: [
+				{ type: "toolCall", id: "tool-a", name: "lookup", arguments: {} },
+				{ type: "toolCall", id: "tool-b", name: "lookup", arguments: {} },
+			] } }),
+			rawMessage("result-a", "", { message: { role: "toolResult", toolCallId: "tool-a", content: [] } }),
+			observationsRecordedEntry("om-b", { observations: [obsB], coversUpToId: "result-a" }),
+			reflectionsRecordedEntry("ref-b", { reflections: [refB], coversUpToId: "result-a" }),
+			rawMessage("result-b", "", { message: { role: "toolResult", toolCallId: "tool-b", content: [] } }),
+		];
+		const first = await setup({ entries, observationsPoolMaxTokens: 100 }).run("result-b") as {
+			compaction: { firstKeptEntryId: string; details: unknown };
+		};
+		expect(first.compaction).toMatchObject({ firstKeptEntryId: "call", details: {
+			fullFold: true, observations: [obsB], reflections: [refA, refB],
+		} });
+
+		entries.push(
+			compactionEntry("checkpoint", first.compaction),
+			observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "result-b" }),
+			rawMessage("question", "next request"),
+		);
+		await expect(setup({ entries, observationsPoolMaxTokens: 100 }).run("question")).resolves.toMatchObject({
+			compaction: { details: { fullFold: false, observations: [obsB], reflections: [refA, refB] } },
+		});
+	});
+
+	it("cancels consecutive attempts when the retained prefix cannot make further progress", async () => {
+		const obs = observation("aaaaaaaaaaaa", { sourceEntryIds: ["old"] });
+		const entries = [
+			textCustomMessage("old", "already removed source"),
+			observationsRecordedEntry("om-old", { observations: [obs], coversUpToId: "old" }),
+			rawMessage("question", "unprocessed request"),
+			compactionEntry("previous", { firstKeptEntryId: "question", details: memoryDetails({ observations: [obs] }) }),
+			textCustomMessage("research", "more unprocessed source"),
+		];
+		const { run, runtime, pi } = setup({ entries });
+		await expect(run("research")).resolves.toEqual({ cancel: true });
+		await expect(run("research")).resolves.toEqual({ cancel: true });
+		expect(runtime.compactHookInFlight).toBe(false);
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("cancels rather than pass Pi an unknown cut or an orphan tool result", async () => {
+		const entries = [
+			textCustomMessage("old", "older source"),
+			observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "old" }),
+			rawMessage("result", "", { message: { role: "toolResult", toolCallId: "missing", content: [] } }),
+		];
+		const { run } = setup({ entries });
+		await expect(run("unknown")).resolves.toEqual({ cancel: true });
+		await expect(run("result")).resolves.toEqual({ cancel: true });
 	});
 
 	it("cancels duplicate in-flight compaction and notifies the UI", async () => {

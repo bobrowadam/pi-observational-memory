@@ -164,8 +164,8 @@ describe("runObserver", () => {
 		await expect(runObserver({ ...baseArgs, agentLoop: loop })).resolves.toBeUndefined();
 	});
 
-	it("throws ObserverStreamError when the stream errors with nothing recorded", async () => {
-		for (const stopReason of ["error", "aborted"]) {
+	it("rejects failed, aborted, or truncated streams with nothing recorded", async () => {
+		for (const stopReason of ["error", "aborted", "length"]) {
 			const loop = fakeAgentLoop(() => {}, [assistantEndEvent(stopReason, "prompt is too long")]);
 			const error = await runObserver({ ...baseArgs, agentLoop: loop }).catch((e) => e);
 			expect(error).toBeInstanceOf(ObserverStreamError);
@@ -174,17 +174,16 @@ describe("runObserver", () => {
 		}
 	});
 
-	it("keeps partial observations when the stream errors after recording", async () => {
-		const loop = fakeAgentLoop(async (_prompts, context) => {
-			await context.tools[0].execute("tool-1", {
-				observations: [{ timestamp: "2026-05-02 10:30", content: "Kept despite later error", relevance: "high", sourceEntryIds: ["entry-a"] }],
-			});
-		}, [assistantEndEvent("error", "gateway timeout")]);
+	it("rejects failed, aborted, or truncated passes after partial observations were recorded", async () => {
+		for (const stopReason of ["error", "aborted", "length"]) {
+			const loop = fakeAgentLoop(async (_prompts, context) => {
+				await context.tools[0].execute("tool-1", {
+					observations: [{ timestamp: "2026-05-02 10:30", content: "Partial output", relevance: "high", sourceEntryIds: ["entry-a"] }],
+				});
+			}, [assistantEndEvent(stopReason, "gateway timeout")]);
 
-		const observations = await runObserver({ ...baseArgs, agentLoop: loop });
-
-		expect(observations).toHaveLength(1);
-		expect(observations?.[0].content).toBe("Kept despite later error");
+			await expect(runObserver({ ...baseArgs, agentLoop: loop })).rejects.toBeInstanceOf(ObserverStreamError);
+		}
 	});
 
 	it("uses finishTurn as an observer turn cap without overriding hard exits", async () => {

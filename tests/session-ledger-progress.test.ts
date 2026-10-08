@@ -74,6 +74,23 @@ describe("session-ledger V3 progress helpers", () => {
 		expect(rawTokensSinceDropCoverage(entries)).toBe(7); // covers ledger entry om-eeeeeeeeeeee, raw after it
 	});
 
+	it("advances empty observation coverage without moving reflection or drop clocks", () => {
+		const entries = [
+			textCustomMessage("raw-1", "aaaa"),
+			textCustomMessage("raw-2", "bbbbbbbb"),
+			observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "raw-2" }),
+			textCustomMessage("raw-3", "cccccccccccc"),
+			observationsRecordedEntry("om-stale", { observations: [], coversUpToId: "raw-1" }),
+			observationsRecordedEntry("om-off-branch", { observations: [], coversUpToId: "missing" }),
+		];
+
+		expect(latestCoverageIndex(entries, V3_OBSERVATIONS_RECORDED)).toBe(1);
+		expect(latestCoverageMarkerId(entries, V3_OBSERVATIONS_RECORDED)).toBe("raw-2");
+		expect(rawTokensSinceObservationCoverage(entries)).toBe(3);
+		expect(rawTokensSinceReflectionCoverage(entries)).toBe(6);
+		expect(rawTokensSinceDropCoverage(entries)).toBe(6);
+	});
+
 	it("lets coversUpToId point to a memory ledger entry", () => {
 		const entries = [
 			textCustomMessage("raw-1", "aaaa"),

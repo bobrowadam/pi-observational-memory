@@ -60,14 +60,16 @@ describe("session-ledger V3 type guards and builders", () => {
 		expect(isObservationsDroppedData(dropData)).toBe(true);
 	});
 
-	it("rejects empty ledger entry data so no empty progress entries can be appended", () => {
-		expect(isObservationsRecordedData({ observations: [], coversUpToId: "raw-1" })).toBe(false);
+	it("accepts empty observer acknowledgements but rejects empty reflection and drop records", () => {
+		expect(isObservationsRecordedData({ observations: [], coversUpToId: "raw-1" })).toBe(true);
+		expect(isObservationsRecordedData({ observations: [], coversUpToId: "" })).toBe(false);
 		expect(isReflectionsRecordedData({ reflections: [], coversUpToId: "raw-1" })).toBe(false);
 		expect(isObservationsDroppedData({ observationIds: [], coversUpToId: "raw-1" })).toBe(false);
 	});
 
-	it("builders return undefined for empty arrays and data for non-empty arrays", () => {
-		expect(buildObservationsRecordedData([], "raw-1")).toBeUndefined();
+	it("builds empty observer acknowledgements and non-empty memory records", () => {
+		expect(buildObservationsRecordedData([], "raw-1")).toEqual({ observations: [], coversUpToId: "raw-1" });
+		expect(buildObservationsRecordedData([], "")).toBeUndefined();
 		expect(buildReflectionsRecordedData([], "raw-1")).toBeUndefined();
 		expect(buildObservationsDroppedData([], "raw-1")).toBeUndefined();
 
@@ -106,6 +108,14 @@ describe("session-ledger V3 type guards and builders", () => {
 			observations: [observation("aaaaaaaaaaaa")],
 			reflections: [reflection("eeeeeeeeeeee", ["aaaaaaaaaaaa"])],
 		}))).toBe(true);
+	});
+
+	it("accepts checkpoint memory coverage while preserving old details without it", () => {
+		const details = { type: OM_FOLDED, version: 1, fullFold: true, observations: [], reflections: [], coversUpToId: "raw-1" };
+		expect(isMemoryDetails(details)).toBe(true);
+		expect(isMemoryDetails({ ...details, coversUpToId: undefined })).toBe(true);
+		expect(isMemoryDetails({ ...details, coversUpToId: "" })).toBe(false);
+		expect(isMemoryDetails({ ...details, coversUpToId: 1 })).toBe(false);
 	});
 
 	it("ignores old V2 observation entries and old V2 compaction details", () => {

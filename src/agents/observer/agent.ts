@@ -225,18 +225,18 @@ ${conversation}`;
 	for await (const event of stream) {
 		// Drain events; the tool's execute already collects records.
 		logAgentStreamError("observer", event);
-		// Watch for a terminal API/stream failure so it is not conflated with
-		// a deliberate empty result.
+		// Failed or truncated output is not a successful empty verdict.
 		const message = (event as { message?: { role?: string; stopReason?: string; errorMessage?: string } }).message;
-		if (message?.role === "assistant" && (message.stopReason === "error" || message.stopReason === "aborted")) {
+		if (message?.role === "assistant" && (
+			message.stopReason === "error" || message.stopReason === "aborted" || message.stopReason === "length"
+		)) {
 			streamError = { stopReason: message.stopReason, errorMessage: message.errorMessage };
 		}
 	}
 	await stream.result();
 
-	if (accumulated.size === 0) {
-		if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
-		return undefined;
-	}
+	// Partial output from a failed pass must not acknowledge the whole chunk.
+	if (streamError) throw new ObserverStreamError(streamError.stopReason, streamError.errorMessage);
+	if (accumulated.size === 0) return undefined;
 	return Array.from(accumulated.values());
 }
