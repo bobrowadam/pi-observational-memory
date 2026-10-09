@@ -14,6 +14,28 @@ caller-supplied `Authorization` header as a substitute apiKey. The acceptance ru
 re-introduce a hard `apiKey` requirement — it breaks compaction/consolidation for every OAuth model.
 Tests: `npm test` (vitest); typecheck: `npm run typecheck`.
 
+## Fallback model (`fallbackModel`)
+
+`config.fallbackModel` is a second memory-worker model. It is tried in two places, both in
+`src/runtime.ts` + `src/hooks/consolidation-trigger.ts`:
+
+- Resolution (`Runtime.resolveModel` → `resolveFallbackModel`): used when the primary memory model
+  (config `model`, else session model) is missing from the registry or has no usable auth.
+- Runtime (`runStageWithFallback`): a worker stage that throws is retried once with the fallback.
+
+`makeModelResolver` caches the fallback for the rest of the pass once it resolves, and a stage whose
+result already carries `fallbackUsed: true` is never retried again. Keep `resolveCandidate` as the
+single place that applies Pi's auth acceptance rule — both the primary and fallback paths must share
+it. Do not make the fallback mandatory: with none configured, the previous skip/fail-safe behavior
+must be byte-for-byte unchanged (covered by `tests/runtime.test.ts` and `tests/consolidation-trigger.test.ts`).
+
+## Prebuilt extension entry
+
+`pi.extensions` loads the committed prebuilt module at `dist/index.ts`, so `src/` edits need
+`npm run build` before committing; CI rebuilds the module and fails when `dist/` is stale (a base
+branch that moved and changed `src/` also needs a merge + rebuild). Keep the output's `.ts`
+extension and the host packages external — `scripts/build.js` explains why.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
@@ -26,5 +48,9 @@ When updating this file, preserve this bar for all agents and keep entries conci
 - Compaction, consolidation, and memory storage use separate token domains. `compactAfterTokens` measures estimated source entries after the compaction boundary, while observation and reflection scheduling can use provider deltas. Pool, serialized-input, stored-memory, and output limits use local estimates. Changes to token accounting must align the trigger, status, documentation, and tests. The diagnostic runbook is `.pi/skills/diagnose-compaction-trigger`.
 - Pi exposes aggregate active-context usage, not exact token attribution for an entry or entry-ID range. Its exported range-capable estimator uses a character heuristic, so provider context cannot replace raw-entry counting without changing semantics.
 - Pi context pressure and compactable history are separate conditions. Extension-requested `ctx.compact()` can fail before `session_before_compact` when Pi finds no removable range, while Pi-native compaction handles this path separately.
-- `firstKeptEntryId` is a retention boundary, not a zero-progress boundary. Retained source entries can already exceed `compactAfterTokens`, so cadence changes must test consecutive post-success turns and distinguish successful repetition from failed-attempt backoff. Checkpoint memory coverage must not be inferred from the raw cut; see [compaction regression tests](tests/compaction-hook.test.ts) for overlap and consecutive-fold cases.
+- `firstKeptEntryId` is a retention boundary, not a zero-progress boundary. Retained source entries can already exceed `compactAfterTokens`, so cadence changes must test consecutive post-success turns and distinguish successful repetition from failed-attempt backoff.
+- Compaction must never discard source entries observation coverage has not reached. The proactive trigger counts observed tokens only (`observedTokensSinceLastCompaction`), and `session_before_compact` either moves `firstKeptEntryId` back to the turn containing the first unobserved entry (folding through the coverage marker, within `compactionMaxRetainedTokens`) or cancels compaction when safe retention is not possible. Pi honors an extension-supplied `firstKeptEntryId`; keep it on a valid cut point (user/assistant message, never a tool result) so no tool result is orphaned. Observer/reflector due-checks take the larger of the raw uncovered backlog and the provider delta: the delta alone starves coverage that fell behind a compaction.
+- `consolidateWhenIdle` moves worker launches to `agent_settled` and aborts in-flight runs on `agent_start` via `runtime.consolidationAbortController`; stages must check `wasAborted` before recording errors or notifying, and `maybeTriggerCompaction` runs after the idle run so compaction is not starved.
+- Summaries are untruncated unless `compactionSummaryMaxTokens` is set; worker memory slices remain bounded independently. Synchronous catch-up defaults to disabled (`compactionCatchUpMaxChunks: 0`). Successful empty observer passes acknowledge coverage; failed, aborted, or output-truncated passes never do, even after partial observations.
+- A moved cut has two boundaries: retention (`firstKeptEntryId`, persisted by Pi) and fold (`details.foldThroughEntryId`). `latestFullFoldBoundaryId` must use the fold boundary (also accepting legacy local `coversUpToId`), or a later compaction re-applies a different set of drops/reflections. Coverage markers are positional claims: any worker that appends one must have read every source entry after the previous marker.
 <!-- opm:managed:end -->

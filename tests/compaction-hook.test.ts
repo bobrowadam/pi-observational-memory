@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { registerCompactionHook } from "../src/hooks/compaction-hook.js";
+import type { MemoryDetails } from "../src/session-ledger/types.js";
 import {
 	compactionEntry,
 	memoryDetails,
@@ -256,21 +257,27 @@ describe("V3 compaction hook", () => {
 			reflectionsRecordedEntry("ref-b", { reflections: [refB], coversUpToId: "result-a" }),
 			rawMessage("result-b", "", { message: { role: "toolResult", toolCallId: "tool-b", content: [] } }),
 		];
-		const first = await setup({ entries, observationsPoolMaxTokens: 100 }).run("result-b") as {
-			compaction: { firstKeptEntryId: string; details: unknown };
+		entries.push(rawMessage("pending", "continue the request"));
+		const first = await setup({ entries, observationsPoolMaxTokens: 100 }).run("pending") as {
+			compaction: { firstKeptEntryId: string; details: MemoryDetails };
 		};
 		expect(first.compaction).toMatchObject({ firstKeptEntryId: "call", details: {
 			fullFold: true, observations: [obsB], reflections: [refA, refB],
 		} });
 
-		entries.push(
-			compactionEntry("checkpoint", first.compaction),
-			observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "result-b" }),
-			rawMessage("question", "next request"),
-		);
-		await expect(setup({ entries, observationsPoolMaxTokens: 100 }).run("question")).resolves.toMatchObject({
-			compaction: { details: { fullFold: false, observations: [obsB], reflections: [refA, refB] } },
-		});
+		for (const legacy of [false, true]) {
+			const { foldThroughEntryId, ...rest } = first.compaction.details;
+			const details = legacy ? { ...rest, coversUpToId: foldThroughEntryId } : first.compaction.details;
+			const nextEntries = [
+				...entries,
+				compactionEntry("checkpoint", { ...first.compaction, details }),
+				observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "result-b" }),
+				rawMessage("question", "next request"),
+			];
+			await expect(setup({ entries: nextEntries, observationsPoolMaxTokens: 100 }).run("question")).resolves.toMatchObject({
+				compaction: { details: { fullFold: false, observations: [obsB], reflections: [refA, refB] } },
+			});
+		}
 	});
 
 	it("cancels consecutive attempts when the retained prefix cannot make further progress", async () => {
@@ -289,15 +296,14 @@ describe("V3 compaction hook", () => {
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 	});
 
-	it("cancels rather than pass Pi an unknown cut or an orphan tool result", async () => {
+	it("cancels rather than pass Pi an unknown cut", async () => {
 		const entries = [
 			textCustomMessage("old", "older source"),
 			observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "old" }),
-			rawMessage("result", "", { message: { role: "toolResult", toolCallId: "missing", content: [] } }),
+			rawMessage("question", "new request"),
 		];
 		const { run } = setup({ entries });
 		await expect(run("unknown")).resolves.toEqual({ cancel: true });
-		await expect(run("result")).resolves.toEqual({ cancel: true });
 	});
 
 	it("cancels duplicate in-flight compaction and notifies the UI", async () => {

@@ -187,7 +187,13 @@ pi install git:github.com/elpapi42/pi-observational-memory
 pi install /absolute/path/to/pi-observational-memory
 ```
 
-Pi loads the extension from `src/index.ts` through the package `pi.extensions` entry.
+Pi loads the extension from the prebuilt `dist/index.ts` module that the package `pi.extensions` entry points at.
+
+---
+
+## Development
+
+`src/` is the source of truth. To regenerate the prebuilt module after editing `src/`, run `npm run build`. CI fails when `dist/` is stale.
 
 ---
 
@@ -218,6 +224,11 @@ A typical config:
     "model": {
       "provider": "openrouter",
       "id": "google/gemma-4-31b-it",
+      "thinking": "low"
+    },
+    "fallbackModel": {
+      "provider": "opencode-go",
+      "id": "deepseek-v4.1-flash",
       "thinking": "low"
     },
     "showWorkerNotifications": true,
@@ -278,7 +289,8 @@ on the `Next compaction` line regardless of mode.
 | `observeAfterTokens`        | `10000`       | Raw/source token threshold for observation runs.                                                  |
 | `observerChunkMaxTokens`    | derived       | Max estimated tokens serialized into one observer chunk (minimum `256`). Unset: `floor(contextWindow * 0.2)` of the resolved memory model, or `60000` when the window is unknown. Larger backlogs drain oldest-first; a single over-budget source is sent as a marked head/tail excerpt while the original source remains in the session ledger. |
 | `reflectAfterTokens`        | `20000`       | Raw/source token threshold for reflection runs; successful reflection creates dropper opportunities. |
-| `compactAfterTokens`        | `81000`       | Estimated source-entry threshold for proactive auto-compaction, counted after the latest compaction boundary. |
+| `compactAfterTokens`        | `81000`       | Estimated source-entry threshold for proactive auto-compaction, counted after the latest compaction boundary and only up to the observation frontier. |
+| `compactionMaxRetainedTokens` | derived     | Max estimated source tokens the compaction hook keeps in context when it retains entries the observer has not reached yet. Unset: half of the session model's context window, or `60000` when unknown. |
 | `compactAfterTokensMode`    | `"calibrated"`| `"calibrated"` uses `compactAfterTokens` directly. `"ratio"` scales the source-entry threshold by the active model's `contextWindow`. |
 | `compactAfterTokensRatio`   | `0.68`        | In `"ratio"` mode, the threshold is `floor(contextWindow * ratio)`. Tunable because large windows do not always mean strong long-range attention. Must be in `(0, 1)`. |
 | `observationsPoolMaxTokens` | `20000`       | Observation-token budget used for compaction full-fold pressure.                                  |
@@ -286,6 +298,11 @@ on the `Next compaction` line regardless of mode.
 | `agentMaxTurns`             | `16`          | Shared turn cap for background memory-agent loops.                                                |
 | `agentMaxTokens`            | `32000`       | Maximum output tokens requested for memory-agent loops (observer/reflector/dropper), clamped to the model's own `maxTokens` when available. Lower it for local servers with a modest context window, e.g. `8192`. |
 | `model`                     | session model | Optional memory-worker model override: `{ provider, id, thinking }`.                              |
+| `compactionSummaryMaxTokens` | unset        | Optional token budget for the rendered memory summary. Unset keeps the full summary without truncation. |
+| `compactionCatchUpMaxChunks` | `0`          | Optional synchronous observer chunks before compaction. Disabled by default so compaction does not wait for worker calls. |
+| `workerMemoryMaxTokens`     | derived       | Token budget for the prior memory each memory-worker request carries (newest first; the dropper sees the oldest observations). Unset: a quarter of the memory model's context window, or `16000`. |
+| `consolidateWhenIdle`       | `false`       | Run memory workers only while the agent is idle and abort them when a new run starts. Use when the session model and the memory model share one context budget (e.g. one local llama.cpp server). |
+| `fallbackModel`             | unset         | Optional second memory-worker model: `{ provider, id, thinking }`. Used when the primary memory model fails to resolve, and to retry a worker stage once when its model call errors. |
 | `showWorkerNotifications`   | `true`        | Shows routine observer, reflector, and dropper progress notifications. Warnings and errors are unaffected. |
 | `passive`                   | `false`       | Disables proactive background observation, reflection, maintenance, and auto-compaction triggers. |
 | `debugLog`                  | `false`       | Writes opt-in per-session extension debug events to Pi's agent directory.                         |
@@ -301,6 +318,8 @@ Valid `model.thinking` values are:
 * `max`
 
 If no `model` is configured, memory workers use the session model, including custom `pi.registerProvider` APIs such as `cursor-sdk`. You do not need a second built-in provider (OpenAI, OpenRouter, …) for observational memory to run. Set `model` only when you want cheaper or faster workers than the coding agent.
+
+Set `fallbackModel` when the memory model may be unavailable: it is tried when the primary memory model cannot be resolved (unknown provider/model or no usable credentials), and a worker stage that errors mid-call is retried once with it. Once the fallback is used, it stays active for the rest of the consolidation pass. With no `fallbackModel` configured, a failed memory model skips or fails safely exactly as before.
 
 Set `showWorkerNotifications` to `false` to hide routine worker start and completion messages (including deliberate-empty observer info messages). Model fallback/unavailability, worker failures (including observer stream errors), compaction notifications, and explicit `/om:*` command output remain visible.
 
@@ -354,11 +373,12 @@ The high-level lifecycle:
 
 The important part: compaction does not need to rethink the whole session from scratch.
 
-The proactive compaction threshold counts estimated source-entry tokens after
-the latest compaction boundary. It includes source entries retained by
-`firstKeptEntryId` and newer source entries, while memory ledger entries and
-compaction metadata contribute zero. `/om:status` uses the same metric. Pi's
-own window-pressure compaction remains independent.
+With Pi automatic compaction enabled, the proactive threshold counts only
+observer-covered estimated source tokens after the latest compaction boundary.
+When Pi automatic compaction is disabled, it counts raw source tokens instead.
+Memory ledger entries and compaction metadata contribute zero. `/om:status`
+uses the same metric. The compaction hook protects unacknowledged history in
+both cases. Pi's own window-pressure compaction remains independent.
 
 ---
 
@@ -368,9 +388,9 @@ Current behavior:
 
 * **Observation-centered memory.** The extension records useful session observations while you work.
 * **Durable reflections.** The extension distills stable facts that help the agent stay oriented over time.
-* **Fast compaction.** `session_before_compact` renders prepared memory without calling a model or waiting for background workers. An acknowledged prefix can be compacted even when it produced no memory.
-* **Acknowledged-history retention.** Compaction preserves both Pi's recent raw tail and all source entries not yet acknowledged by the observer. It extends the tail backward to keep tool calls and their results together, and cancels if no current source prefix can safely be removed.
-* **Independent observer coverage.** Successful observer passes acknowledge their chunk even with zero observations. Failed, aborted, or truncated passes do not advance coverage. Covered sources retained in the raw tail are not observed again.
+* **Fast compaction.** By default, `session_before_compact` renders prepared memory without calling a model or waiting for background workers. Synchronous catch-up is disabled (`compactionCatchUpMaxChunks: 0`).
+* **Full summaries by default.** The summary is untruncated unless `compactionSummaryMaxTokens` is explicitly set. Worker prompts use separate bounded memory slices (`workerMemoryMaxTokens`) without deleting ledger records.
+* **Acknowledged history only.** Successful observer passes advance coverage even when they produce no observations. Failed, aborted, or output-truncated passes do not. Compaction retains unacknowledged history within `compactionMaxRetainedTokens`, or cancels when safe retention is not possible. An acknowledged empty prefix can be compacted with an empty summary.
 * **Background memory work.** Observation and reflection work run from `turn_end` when their token clocks are due; dropper work runs only after successful reflection and prunes the folded active observation ledger toward `observationsPoolTargetTokens`.
 * **Source-backed recall.** Observations and reflections can be traced back through the `recall` tool.
 * **Visible/full views.** `/om:view` shows visible memory and `/om:view full` shows the full current memory state. Use `/om:status` for visible-vs-full drift and for the separate visible observation pool vs active observation pool.
