@@ -324,7 +324,7 @@ function isObservationsDroppedData(value) {
 }
 function isMemoryDetails(value) {
   if (!isPlainRecord(value)) return false;
-  return value.type === OM_FOLDED && value.version === 1 && typeof value.fullFold === "boolean" && (value.coversUpToId === void 0 || isNonEmptyString(value.coversUpToId)) && Array.isArray(value.observations) && value.observations.every(isObservation) && Array.isArray(value.reflections) && value.reflections.every(isReflection) && (value.foldThroughEntryId === void 0 || typeof value.foldThroughEntryId === "string");
+  return value.type === OM_FOLDED && value.version === 1 && typeof value.fullFold === "boolean" && Array.isArray(value.observations) && value.observations.every(isObservation) && Array.isArray(value.reflections) && value.reflections.every(isReflection) && (value.foldThroughEntryId === void 0 || typeof value.foldThroughEntryId === "string");
 }
 function isObservationsRecordedEntry(entry) {
   return entry.type === "custom" && entry.customType === OM_OBSERVATIONS_RECORDED && isObservationsRecordedData(entry.data);
@@ -683,7 +683,7 @@ function latestFullFoldBoundaryId(entries) {
     if (entry.type !== "compaction") continue;
     if (!isMemoryDetails(entry.details)) continue;
     if (!entry.details.fullFold) continue;
-    const foldThroughId = entry.details.foldThroughEntryId ?? entry.details.coversUpToId;
+    const foldThroughId = entry.details.foldThroughEntryId;
     if (foldThroughId && indexes.has(foldThroughId)) return foldThroughId;
     if (!entry.firstKeptEntryId) continue;
     if (!indexes.has(entry.firstKeptEntryId)) continue;

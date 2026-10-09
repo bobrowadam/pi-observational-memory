@@ -265,19 +265,15 @@ describe("V3 compaction hook", () => {
 			fullFold: true, observations: [obsB], reflections: [refA, refB],
 		} });
 
-		for (const legacy of [false, true]) {
-			const { foldThroughEntryId, ...rest } = first.compaction.details;
-			const details = legacy ? { ...rest, coversUpToId: foldThroughEntryId } : first.compaction.details;
-			const nextEntries = [
-				...entries,
-				compactionEntry("checkpoint", { ...first.compaction, details }),
-				observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "result-b" }),
-				rawMessage("question", "next request"),
-			];
-			await expect(setup({ entries: nextEntries, observationsPoolMaxTokens: 100 }).run("question")).resolves.toMatchObject({
-				compaction: { details: { fullFold: false, observations: [obsB], reflections: [refA, refB] } },
-			});
-		}
+		const nextEntries = [
+			...entries,
+			compactionEntry("checkpoint", first.compaction),
+			observationsRecordedEntry("om-empty", { observations: [], coversUpToId: "result-b" }),
+			rawMessage("question", "next request"),
+		];
+		await expect(setup({ entries: nextEntries, observationsPoolMaxTokens: 100 }).run("question")).resolves.toMatchObject({
+			compaction: { details: { fullFold: false, observations: [obsB], reflections: [refA, refB] } },
+		});
 	});
 
 	it("cancels consecutive attempts when the retained prefix cannot make further progress", async () => {

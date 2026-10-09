@@ -110,14 +110,6 @@ describe("session-ledger V3 type guards and builders", () => {
 		}))).toBe(true);
 	});
 
-	it("accepts checkpoint memory coverage while preserving old details without it", () => {
-		const details = { type: OM_FOLDED, version: 1, fullFold: true, observations: [], reflections: [], coversUpToId: "raw-1" };
-		expect(isMemoryDetails(details)).toBe(true);
-		expect(isMemoryDetails({ ...details, coversUpToId: undefined })).toBe(true);
-		expect(isMemoryDetails({ ...details, coversUpToId: "" })).toBe(false);
-		expect(isMemoryDetails({ ...details, coversUpToId: 1 })).toBe(false);
-	});
-
 	it("ignores old V2 observation entries and old V2 compaction details", () => {
 		expect(isObservationsRecordedEntry(oldV2ObservationEntry("v2-entry"))).toBe(false);
 		expect(isMemoryDetails(oldV2CompactionDetails())).toBe(false);

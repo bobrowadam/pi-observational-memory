@@ -57,8 +57,6 @@ export type MemoryDetails = {
 	type: typeof OM_FOLDED;
 	version: 1;
 	fullFold: boolean;
-	/** Memory coverage can extend beyond the raw retention boundary. */
-	coversUpToId?: string;
 	observations: Observation[];
 	reflections: Reflection[];
 	/**
@@ -152,7 +150,6 @@ export function isMemoryDetails(value: unknown): value is MemoryDetails {
 		value.type === OM_FOLDED &&
 		value.version === 1 &&
 		typeof value.fullFold === "boolean" &&
-		(value.coversUpToId === undefined || isNonEmptyString(value.coversUpToId)) &&
 		Array.isArray(value.observations) &&
 		value.observations.every(isObservation) &&
 		Array.isArray(value.reflections) &&
